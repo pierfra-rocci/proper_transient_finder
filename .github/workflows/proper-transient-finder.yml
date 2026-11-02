@@ -1,0 +1,49 @@
+name: Proper Transient Finder
+
+on:
+  push:
+    paths:
+      - "proper_transient_finder/**"
+      - ".github/workflows/proper-transient-finder.yml"
+      - ".gitignore"
+  pull_request:
+    paths:
+      - "proper_transient_finder/**"
+      - ".github/workflows/proper-transient-finder.yml"
+      - ".gitignore"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: proper_transient_finder
+    env:
+      OMP_NUM_THREADS: "1"
+    steps:
+      - name: Check Out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Set Up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+      - name: Install Development Environment
+        run: ./scripts/bootstrap.ps1 -PythonPath (Get-Command python).Source
+      - name: Install Documentation Tools
+        run: python -m pip install --editable ".[docs]"
+      - name: Check Lint And Formatting
+        run: ./scripts/lint.ps1 -PythonPath (Get-Command python).Source
+      - name: Run Astronomy Tests
+        run: ./scripts/test.ps1 -PythonPath (Get-Command python).Source
+      - name: Check And Build Documentation
+        run: ./scripts/docs.ps1 -PythonPath (Get-Command python).Source -Check -Build
+      - name: Build Wheel And Source Archive
+        run: ./scripts/build.ps1 -PythonPath (Get-Command python).Source -NoIsolation

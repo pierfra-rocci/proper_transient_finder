@@ -1,0 +1,12 @@
+include pyproject.toml README.md USER_GUIDE.md run_proper_transient_finder.py mkdocs.yml
+recursive-include src *.py py.typed
+recursive-include tests *.py
+recursive-include experiments *.py
+recursive-include scripts *.ps1 *.py
+recursive-include docs *.md
+prune artifacts
+prune build
+prune dist
+prune site
+prune .venv
+global-exclude *.py[cod]
