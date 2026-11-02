@@ -22,9 +22,9 @@ if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw "Python executable not found: $python. Create the project environment or pass -PythonPath explicitly."
 }
 $python = (Resolve-Path -LiteralPath $python).ProviderPath
-& $python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 13) else 1)"
+& $python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
 if ($LASTEXITCODE -ne 0) {
-    throw "The selected interpreter must be Python 3.13 or newer."
+    throw "The selected interpreter must be Python 3.11 or newer."
 }
 $destination = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     Join-Path $projectRoot "dist"

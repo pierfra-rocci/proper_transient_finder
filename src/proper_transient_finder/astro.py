@@ -986,16 +986,28 @@ class ProperTransientFinder:
             return normalize_psf(fits.getdata(supplied, memmap=False), self.options.psf_radius)
         from properimage.single_image import SingleImageGaussPSF
 
+        catalog = star_catalog(frame)
+        if len(catalog) < self.options.min_stars:
+            raise ValueError(
+                f"Too few isolated stars for PSF estimation: {len(catalog)}; "
+                f"require >= {self.options.min_stars}. Check masks, saturation, and seeing."
+            )
         with SingleImageGaussPSF(
             frame.data,
             mask=frame.mask,
             guessmask=False,
             gain=frame.gain,
             min_sources=self.options.min_stars,
-            strict_star_pick=True,
+            strict_star_pick=False,
             stamp_shape=(2 * self.options.psf_radius + 1,) * 2,
             smooth_psf=self.options.smooth_psf,
         ) as image:
+            # ProperImage's own strict selection silently keeps every detected
+            # source when fewer than 15 pass its cuts, so galaxy light, blends
+            # and noise widen the Gaussian fit. Seed its source cache with our
+            # isolated SEP stars instead, which are already round, unmasked and
+            # isolated; this keeps ProperImage's stamping and fitting machinery.
+            image._best_sources = catalog[:50]
             _, basis = image.get_variable_psf(inf_loss=self.options.inf_loss)
             if image.n_sources < self.options.min_stars:
                 raise ValueError(

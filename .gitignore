@@ -29,11 +29,8 @@ survey_cache/
 # PowerShell history and temporary files
 *.ps1.history
 *.tmp
-.github/*
-!.github/workflows/
-.github/workflows/*
-!.github/workflows/proper-transient-finder.yml
 .png
 *.fits.fz
 *.fits
 *.fit
+freebuff*

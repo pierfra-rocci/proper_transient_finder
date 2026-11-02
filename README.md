@@ -7,7 +7,7 @@ Developed with assistance from ChatGPT, Claude, and Mistral.
 **Compare two images of the sky to spot what changed.**
 
 Python library for PSF-matched FITS difference imaging and unconfirmed
-transient-candidate analysis. Python 3.13 or newer is required.
+transient-candidate analysis. Python 3.11 or newer is required.
 
 The distribution is named `proper-transient-finder`; import it as
 `proper_transient_finder`.
@@ -21,7 +21,7 @@ decompression is required; files must retain their original binary contents.
 Install a built wheel into your chosen Python environment:
 
 ```powershell
-python -m pip install .\dist\proper_transient_finder-0.1.0-py3-none-any.whl
+python -m pip install ./dist/proper_transient_finder-0.1.0-py3-none-any.whl
 python -m pip check
 ```
 
@@ -213,11 +213,18 @@ was approximately 0.78/1.67 GB. All usable injections were recovered; masked
 injections were lost. The 50 MB cases had a recurrent false positive for one noise
 seed. These are exploratory timings, not guaranteed performance.
 
-**Important limitation:** automatic PSF estimation failed on all four clean
-20/50 MB pilot cases, before detection. The successful known-PSF control uses
-the injection-model PSFs and does **not** validate automatic analysis. These are
-synthetic transients, not observed real events. Real-transient validation still
-requires identified, calibrated reference/science pairs and annotated truth.
+**Automatic PSF (fixed 2026-11-03):** the earlier failure of the four clean
+20/50 MB pilot cases was traced to ProperImage's strict star selection silently
+falling back to *every* detected source when fewer than 15 stars pass its cuts;
+galaxy light, blends and noise peaks then widened the Gaussian fit until the
+support guard rejected it. The estimator now seeds ProperImage's source cache
+with the pipeline's own isolated SEP stars. Re-checked clean pairs with
+automatic PSFs completed in 25.5 s at 20 MB and 65.5 s at 50 MB, with FWHM
+3.19/4.30 and 3.19/4.34 pixels against injected 3.06/4.24, recovering all five
+50 MB injections (the 1,800 ADU source was missed at 20 MB). These are
+single-pair checks, not a rerun of the 40-case campaign, and other scenes and
+observed transients remain unvalidated. The known-PSF control above used the
+injection-model PSFs and did **not** exercise automatic estimation.
 See [the full benchmark guide](USER_GUIDE.md#medium-fits-robustness-and-timing).
 
 ## Documentation
@@ -237,10 +244,19 @@ python -m pip install ".[docs]"
 .\scripts\docs.ps1 -Serve
 ```
 
+On Linux, macOS, or Git Bash, use `PYTHON` instead of `-PythonPath`:
+
+```bash
+python -m pip install ".[docs]"
+bash scripts/tasks.sh docs --build
+bash scripts/tasks.sh docs --serve
+```
+
 The publishable static site is written to `site/`. The local preview is at
-<http://127.0.0.1:8001/>. Pass `-PythonPath` to either script command when using
-another prepared interpreter. See the publication guide for GitHub Pages and
-other static hosts. No publication is performed automatically.
+<http://127.0.0.1:8001/>. Pass `-PythonPath` (PowerShell) or `PYTHON=<path>`
+(`scripts/tasks.sh`) when using another prepared interpreter. See the
+publication guide for GitHub Pages and other static hosts. No publication is
+performed automatically.
 
 ### API Markdown
 
@@ -251,30 +267,47 @@ Regenerate the API reference from the project directory:
 .\scripts\docs.ps1 -PythonPath .\.venv\Scripts\python.exe -Check
 ```
 
-Use the path to your existing Python 3.13+ interpreter when the project environment
+```bash
+PYTHON=.venv/bin/python bash scripts/tasks.sh docs
+PYTHON=.venv/bin/python bash scripts/tasks.sh docs --check
+```
+
+Use the path to your existing Python 3.11+ interpreter when the project environment
 does not exist. Generation uses only the standard library, makes no network
 requests, and produces Markdown that GitHub renders without a site build.
 
 ## GitHub Readiness
 
-The repository includes a Windows/Python 3.13 GitHub Actions workflow for lint,
-tests, documentation freshness, and wheel/source builds. Documentation is
-ordinary checked-in Markdown; GitHub Pages configuration is not required.
+The repository includes a GitHub Actions workflow that tests Python 3.11, 3.12,
+and 3.13 on Windows, Linux, and macOS for lint, tests, documentation freshness,
+and wheel/source builds. Windows uses the PowerShell scripts; Linux and macOS
+use `scripts/tasks.sh`. Documentation is ordinary checked-in Markdown; GitHub
+Pages configuration is not required.
 Build outputs, virtual environments, and generated observation/test artifacts
 are ignored and should not be committed.
 
-**Before an open-source release, the owner must choose and add a license.**
-No project license is currently declared; acknowledgments do not grant rights
-to reuse this project's code or replace third-party license obligations.
-Also confirm permission to publish the repository and review tracked files
-for private data/secrets. No GitHub publication or PyPI upload is performed
-by the supplied scripts.
+**License:** this project is released under the BSD 3-Clause License; see
+[LICENSE](LICENSE). Third-party components keep their own licenses (ProperImage,
+Astropy, and most of the scientific stack are BSD-3-Clause; SEP is LGPLv3+), and
+their citation and license obligations still apply.
 
-Place the workflow in the repository's `.github/workflows/` directory.
-Its working directory and path filters must match the location of this
-library's project files; use `.` when they are at the repository root.
-Add the actual repository/documentation URLs to package metadata once the
-destination is known.
+Before publishing, confirm permission to publish the repository and review
+tracked files for private data/secrets. No GitHub publication or PyPI upload is
+performed by the supplied scripts.
+
+The checked-in workflow runs from the repository root (`working-directory: .`)
+on every push and pull request. It deliberately has no `paths` filter, so a
+change to `pyproject.toml`, the tests, or the documentation still runs the
+quality job. If the project files ever move, update that setting and the script
+paths in the same commit. Package metadata points at
+<https://github.com/pierfra-rocci/proper_transient_finder> for source, issues,
+and documentation.
+
+## License
+
+Released under the BSD 3-Clause License; see [LICENSE](LICENSE). Third-party
+components keep their own licenses, and their citation and license obligations
+still apply.
 
 ## Acknowledgments
 

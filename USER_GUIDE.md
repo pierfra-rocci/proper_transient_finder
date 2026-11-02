@@ -39,12 +39,15 @@ Current files, relative to this guide's directory:
 | `scripts/lint.ps1` | Lint and format-check this project's Python files. |
 | `scripts/build.ps1` | Build wheel/source distributions and optionally a complete dependency wheelhouse. |
 | `scripts/verify_install.ps1` | Install into a fresh environment and test the installed API/CLIs outside the checkout. |
+| `scripts/tasks.sh` | POSIX shell equivalents of the PowerShell tasks for Linux, macOS, and Git Bash. |
 
 ## 2. Requirements And Setup
 
-Use Windows PowerShell and Python 3.13 or later. The verified runtime for this
-implementation is Python 3.13.14 with ProperImage 0.7.2. This does not certify
-every later interpreter or dependency release.
+Use Python 3.11 or later with Windows PowerShell or a POSIX shell (`bash`). The
+verified runtime for this implementation is Python 3.13.17 with ProperImage
+0.7.2; the regression suite is also required to pass on Python 3.11 and 3.12.
+This does not certify every later interpreter or dependency release. The
+PowerShell examples below have POSIX equivalents in `scripts/tasks.sh`.
 
 From the astronomy project directory, define these variables once in
 your PowerShell session:
@@ -63,13 +66,21 @@ activation is optional. This avoids installing into one Python environment
 and executing with another.
 
 If the virtual environment does not exist, create it and install the project
-from its own directory using an approved local Python 3.13+ installation:
+from its own directory using an approved local Python 3.11+ installation:
 
 ```powershell
 Push-Location $PipelineRoot
 py -3.13 -m venv .venv
 .\scripts\bootstrap.ps1
 Pop-Location
+```
+
+On Linux, macOS, or Git Bash the equivalent is:
+
+```bash
+cd /path/to/project
+python3 -m venv .venv
+PYTHON=.venv/bin/python bash scripts/tasks.sh bootstrap
 ```
 
 Install using the package indexes configured for your environment:
@@ -111,12 +122,14 @@ To install development tools for the targeted checks below:
 
 ### Explicit Interpreter In Project Scripts
 
-The project `bootstrap.ps1`, `lint.ps1`, and `test.ps1` wrappers accept
-`-PythonPath`. Without it they still require this project's `.venv`; there is
-no automatic fallback. Every wrapper checks for Python 3.13 or newer.
-Bootstrap installs into the selected interpreter's environment.
+The six project scripts (`bootstrap.ps1`, `lint.ps1`, `test.ps1`, `build.ps1`,
+`docs.ps1`, `verify_install.ps1`) accept `-PythonPath`; the POSIX equivalents
+in `scripts/tasks.sh` use `PYTHON`. Without either they still require this
+project's `.venv`; there is no automatic fallback. Every wrapper checks for
+Python 3.11 or newer. Bootstrap installs into the selected interpreter's
+environment.
 
-To use a different prepared Python 3.13+ environment, set `$Python` to its
+To use a different prepared Python 3.11+ environment, set `$Python` to its
 interpreter path. That environment must have this library and its development
 dependencies installed. Then run the project wrappers:
 
@@ -128,6 +141,25 @@ dependencies installed. Then run the project wrappers:
 These commands work from any working directory. The test wrapper explicitly
 selects the project's test directory; lint includes `experiments/` as well as
 the package, tests, and launcher.
+
+On Linux, macOS, and Git Bash, `scripts/tasks.sh` provides the same tasks and
+selects the interpreter with the `PYTHON` environment variable instead of
+`-PythonPath`:
+
+```bash
+export PYTHON=.venv/bin/python
+bash scripts/tasks.sh bootstrap
+bash scripts/tasks.sh lint
+bash scripts/tasks.sh test -q -k preflight
+bash scripts/tasks.sh docs --check --build
+bash scripts/tasks.sh build --no-isolation
+bash scripts/tasks.sh verify-install --distribution dist/proper_transient_finder-0.1.0-py3-none-any.whl
+```
+
+Its options mirror the PowerShell parameters: `--output-directory` for
+`-OutputDirectory`, `--address` for `-Address`, `--wheelhouse` for `-Wheelhouse`,
+and so on. Both front ends run the same `python -m` commands, and the CI matrix
+exercises each on its own platform.
 
 ### Documentation Website
 
@@ -246,9 +278,10 @@ Verification environments are retained and printed, not deleted automatically.
 Built artifacts are ignored by Git and must be rebuilt after source changes.
 
 These scripts build and verify local distributions; they do not publish to
-PyPI or another registry. Publication needs the owner's chosen license and
-registry metadata/authorization. Verified Windows/Python 3.13 installation
-does not certify every operating system or later Python/dependency release.
+PyPI or another registry. Publication needs registry credentials and the
+license declared in `pyproject.toml`; this repository declares BSD-3-Clause
+(`LICENSE`). A verified Windows installation does not certify every operating
+system or later Python/dependency release.
 
 ## 3. Prepare The Images
 
@@ -1126,7 +1159,7 @@ To see individual test names or investigate one behavior:
 & $Python -m pytest -c $Configuration $AstroTests -q -k properimage
 ```
 
-The current suite expands to 114 test cases, including parameterized invalid
+The current suite expands to 170 test cases, including parameterized invalid
 configuration and preflight checks. It covers:
 
 - Score calibration, preservation of bright sources, and invalid-pixel masks.
@@ -1430,13 +1463,30 @@ Machine: Windows 11, Intel64 Family 6 Model 186 Stepping 2, 20 logical processor
 Python 3.13.14, NumPy 2.5.1, SciPy 1.18.1, Astropy 8.0.1, Astroscrappy 1.3.0.
 One worker at a time, one thread limit per native backend, plots/reprojection off.
 
-**Automatic PSF pilot:** clean null and injected cases at both sizes failed before
-detection because the estimated PSF exceeded radius 8. Time to failure was
-22.4-24.7 s at 20 MB and 61.8-64.3 s at 50 MB. These are not successful analysis
-times. Increasing support alone on a small diagnostic scene did not solve strict
-PSF-star selection. Do not remove the guard or silently substitute known PSFs in
-real observations. This limitation requires separate investigation before claiming
-robust automatic processing of comparable noisy scenes.
+**Automatic PSF pilot (2026-11-02) and fix (2026-11-03):** the pilot failed before
+detection because the estimated PSF exceeded radius 8 (22.4-24.7 s at 20 MB,
+61.8-64.3 s at 50 MB). The cause was ProperImage's strict star selection: it logs
+`only had N valid sources (< 15). Keeping all M sources` and then fits the
+Gaussian to every detected source, so the Sersic host, blends and noise peaks
+widened the fit (sigma 3.76 at radius 8, 323 at radius 10). Raising
+`--psf-radius` alone made it worse, because fewer stars pass the cuts at larger
+stamps.
+
+`ProperTransientFinder._estimate_psf` now seeds ProperImage's source cache with
+the pipeline's isolated SEP stars (already round, unmasked and unblended) and
+lets ProperImage perform the stamp extraction and Gaussian fit. Re-checked clean
+pairs at the default radius 8 with automatic PSFs:
+
+| FITS per input | Analysis | Reference / science FWHM | Injected FWHM | Recoveries |
+| --- | --- | --- | --- | --- |
+| ~20 MB | 25.5 s | 3.19 / 4.30 px | 3.06 / 4.24 px | 3 positives + 1 fading; 1,800 ADU source missed |
+| ~50 MB | 65.5 s | 3.19 / 4.34 px | 3.06 / 4.24 px | all 5 injections |
+
+Both runs used `PipelineConfig(plots=False)` on one clean scene and one noise
+seed, so this is not a rerun of the 40-case campaign; the detector, trail and
+masked scenes still need their own automatic-PSF pass. The support guard remains
+in force: a genuinely broad PSF must raise `--psf-radius` rather than be
+cropped, and supplied measured PSFs remain the preferred option for real data.
 
 **Known-PSF control:** all 40 cases completed. Median/range across all 20 cases
 at each size (null and injected scenes mixed):
@@ -1511,7 +1561,7 @@ false-positive rate, or calibrated scientific uncertainties for your instrument.
 | Symptom | Action |
 | --- | --- |
 | tinynpydb build downloads old setuptools and gets HTTP 403 | Apply the compatible-setuptools/no-build-isolation steps in section 2. |
-| Astronomy package or dependency is missing | Run `scripts/bootstrap.ps1` from `$PipelineRoot` and use `$PipelineRoot\.venv\Scripts\python.exe`. |
+| Astronomy package or dependency is missing | Run `scripts/bootstrap.ps1` (Windows) or `bash scripts/tasks.sh bootstrap` (POSIX) from the project root, then use that environment's interpreter: `.venv\Scripts\python.exe` or `.venv/bin/python`. |
 | `.fz` Rice decompression fails or HDU headers are malformed | Verify the original binary download and provider checksum. Renaming extensions or changing detection thresholds cannot repair altered compressed bytes. |
 | Too few isolated/matched/PSF stars | Check field overlap, masks, saturation, image quality, and sampling; do not invent a PSF from insufficient stars. |
 | Registration RMS exceeds tolerance | Use `--align`, inspect star matches, and verify that both files cover the same field. |

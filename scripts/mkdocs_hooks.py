@@ -9,6 +9,7 @@ from mkdocs.config.defaults import MkDocsConfig
 from mkdocs.structure.files import File, Files
 
 SOURCE_PAGES = {"README.md": "index.md", "USER_GUIDE.md": "user-guide.md"}
+REPO_FILES = {"LICENSE": "blob/main/LICENSE"}
 
 
 def on_files(files: Files, config: MkDocsConfig) -> Files:
@@ -19,7 +20,7 @@ def on_files(files: Files, config: MkDocsConfig) -> Files:
     return files
 
 
-def on_page_markdown(markdown: str, **kwargs: object) -> str:
+def on_page_markdown(markdown: str, *, config: MkDocsConfig, **kwargs: object) -> str:
     targets = {
         **SOURCE_PAGES,
         "docs/API.md": "API.md",
@@ -31,4 +32,10 @@ def on_page_markdown(markdown: str, **kwargs: object) -> str:
                 original = f"]({prefix}{source}{suffix}"
                 replacement = f"]({destination}{suffix}"
                 markdown = markdown.replace(original, replacement)
+    repository = str(config.get("repo_url") or "").rstrip("/")
+    for name, path in REPO_FILES.items():
+        if not repository:
+            break
+        for prefix in ("", "../"):
+            markdown = markdown.replace(f"]({prefix}{name})", f"]({repository}/{path})")
     return markdown

@@ -8,12 +8,16 @@ authors = [{name = "Pier-Francesco Rocci"}]
 dynamic = ["version"]
 description = "PSF-matched FITS difference imaging and transient candidate analysis."
 readme = "README.md"
-requires-python = ">=3.13"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Astronomy",
     "Typing :: Typed",
@@ -47,12 +51,18 @@ dev = [
 [project.scripts]
 proper-transient-finder = "proper_transient_finder.astro:main"
 
+[project.urls]
+Homepage = "https://github.com/pierfra-rocci/proper_transient_finder"
+Repository = "https://github.com/pierfra-rocci/proper_transient_finder"
+Issues = "https://github.com/pierfra-rocci/proper_transient_finder/issues"
+Documentation = "https://github.com/pierfra-rocci/proper_transient_finder/blob/main/USER_GUIDE.md"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra"]
 
 [tool.ruff]
-target-version = "py313"
+target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]

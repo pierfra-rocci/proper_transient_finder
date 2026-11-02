@@ -1,8 +1,8 @@
-include pyproject.toml README.md USER_GUIDE.md run_proper_transient_finder.py mkdocs.yml
+include pyproject.toml README.md USER_GUIDE.md LICENSE run_proper_transient_finder.py mkdocs.yml
 recursive-include src *.py py.typed
 recursive-include tests *.py
 recursive-include experiments *.py
-recursive-include scripts *.ps1 *.py
+recursive-include scripts *.ps1 *.sh *.py
 recursive-include docs *.md
 prune artifacts
 prune build

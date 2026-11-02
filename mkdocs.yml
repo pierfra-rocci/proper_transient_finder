@@ -1,6 +1,9 @@
 site_name: Proper Transient Finder
 site_author: Pier-Francesco Rocci
 site_description: PSF-matched FITS difference imaging and transient-candidate analysis.
+site_url: https://pierfra-rocci.github.io/proper_transient_finder/
+repo_url: https://github.com/pierfra-rocci/proper_transient_finder
+repo_name: pierfra-rocci/proper_transient_finder
 docs_dir: docs
 site_dir: site
 strict: true

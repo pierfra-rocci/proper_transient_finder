@@ -12,21 +12,30 @@ No Python process is required on the hosting server.
 ## Install Documentation Tools
 
 Run these commands from the directory containing `mkdocs.yml` with your
-chosen Python 3.13+ interpreter:
+chosen Python 3.11+ interpreter:
 
 ```powershell
 python -m pip install ".[docs]"
 ```
 
 Documentation tools are optional and are not runtime dependencies of the
-astronomy library. The default scripts use `.venv\Scripts\python.exe`;
-pass `-PythonPath` to select another prepared interpreter.
+astronomy library. The default PowerShell scripts use `.venv\Scripts\python.exe`;
+pass `-PythonPath` (or `PYTHON=<path>` for `scripts/tasks.sh`) to select another
+prepared interpreter.
 
 ## Build And Preview
 
 ```powershell
 .\scripts\docs.ps1 -Build
 .\scripts\docs.ps1 -Serve
+```
+
+On Linux, macOS, or Git Bash:
+
+```bash
+bash scripts/tasks.sh docs --build
+bash scripts/tasks.sh docs --serve
+bash scripts/tasks.sh docs --serve --address 127.0.0.1:8002
 ```
 
 The build regenerates the API reference and validates the site with
@@ -46,7 +55,7 @@ hook. Re-run the build after changes to Python API signatures or defaults.
 | --- | --- |
 | Quick Start | `README.md` |
 | User Guide | `USER_GUIDE.md` |
-| API Reference | `docs/API.md`, generated from Python source by `scripts/docs.ps1` |
+| API Reference | `docs/API.md`, generated from Python source by `scripts/docs.ps1` (or `scripts/tasks.sh docs` on POSIX) |
 | Publish Documentation | `docs/publishing.md` |
 
 The MkDocs hook exposes the README and user guide as pages without copying
@@ -63,9 +72,10 @@ This command fails if the API Markdown is stale, a page is missing, or the
 strict site build reports a broken documentation link or anchor. The repository's
 quality workflow also runs this check. Inspect the preview before publishing.
 
-Before a public release, choose and add a project license, confirm permission
-to publish, and review the site for private observations, credentials, and
-internal paths. Follow ProperImage and Astropy citation and license requirements.
+Before a public release, confirm permission to publish and review the site for
+private observations, credentials, and internal paths. The project declares the
+BSD 3-Clause License in `pyproject.toml` and `LICENSE`; follow ProperImage and
+Astropy citation and license requirements in addition.
 
 ## Static Hosting
 
@@ -74,20 +84,22 @@ subdirectory. Do not upload virtual environments, FITS observations, experiment
 artifacts, or the entire source checkout. The built site uses local theme assets;
 it does not require Google Fonts or an external script CDN.
 
-Once the public address is known, set `site_url` in `mkdocs.yml` to that exact
-address, including any hosting subdirectory, then rebuild. For example:
+`site_url` in `mkdocs.yml` is already set to this repository's GitHub Pages
+address:
 
 ```yaml
-site_url: https://example.org/proper-transient-finder/
+site_url: https://pierfra-rocci.github.io/proper_transient_finder/
 ```
 
-Setting the real address enables correct canonical URLs and sitemap entries.
-No placeholder address is configured in the supplied site.
+It enables correct canonical URLs and sitemap entries. If the site is hosted
+either, change this value to that exact address, including any hosting
+subdirectory, and rebuild.
 
 ## GitHub Pages
 
-In the intended repository, configure GitHub Pages to publish the `gh-pages`
-branch at `/ (root)`. After validation, run:
+In this repository, configure GitHub Pages to publish the `gh-pages` branch at
+`/ (root)`; the site is then served from
+<https://pierfra-rocci.github.io/proper_transient_finder/>. After validation, run:
 
 ```powershell
 python -m mkdocs gh-deploy --strict --config-file mkdocs.yml
