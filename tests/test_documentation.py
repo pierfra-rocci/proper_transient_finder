@@ -121,3 +121,10 @@ def test_api_reference_header_matches_public_version() -> None:
     assert f"Version: `{package.__version__}`" in api, "docs/API.md version is stale"
     header = next(line for line in api.splitlines() if line.startswith("Generated from source"))
     assert "scripts/docs.ps1" in header and "scripts/tasks.sh docs" in header
+
+
+def test_posix_task_script_is_checked_out_with_lf() -> None:
+    """Keep bash source free of carriage returns on Linux and macOS runners."""
+    task_script = PROJECT_ROOT / "scripts" / "tasks.sh"
+    assert b"\r" not in task_script.read_bytes(), "tasks.sh must use LF line endings"
+    assert "*.sh text eol=lf" in read(".gitattributes")
