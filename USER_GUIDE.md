@@ -417,15 +417,13 @@ center-to-boundary separation with 10% padding, so its requested square can be
 larger than either image side. Even a nominally 20-arcminute square field can
 exceed the current limit after its diagonal and padding are included.
 
-If the error reports an oversized footprint, use a **separate, explicit science
-crop with updated WCS**, retaining all aligned mask/variance/error planes; this
-tests only that region, not the full observation. Alternatively process explicit
-tiles or provide an appropriate larger local reference through
-`--ref reference.fits --new science.fits --reproject`. Automatic tiling/mosaicking
-and a survey-size override are not implemented. Do not remove the service limit
-or change pixel scale headers merely to make a request pass. Keep the original
-science file unchanged. SkyMapper is not a workaround for large fields: it has
-a smaller size limit and different sky coverage.
+The automatic `--survey` workflow intentionally remains a one-cutout operation:
+it does not tile or crop inputs. For larger fields, use the separate preparer
+below, then pass its generated files through the ordinary local-reference
+`--ref/--new --reproject` workflow. Do not remove the service limit or change
+pixel-scale headers merely to make a request pass. The original science FITS is
+never edited. SkyMapper is not a workaround for large fields: it has a smaller
+size limit and different sky coverage.
 
 An Astropy `obsfix` warning about inconsistent observatory coordinates is
 separate from the cutout size check. Review the observation metadata upstream;
@@ -452,6 +450,43 @@ first. This workflow does not plate-solve or calibrate the science exposure.
 & $Python $PipelineScript --survey auto --new "C:\data\science.fits" --template-filter r --check-only
 & $Python $PipelineScript --survey panstarrs --new "C:\data\science.fits" --template-filter r --template-units adu --template-cache "C:\cache\survey" --output "C:\results\survey_001"
 ```
+
+#### Standalone Large-Footprint Mosaic Preparer
+
+This utility is deliberately separate from the pipeline script. It derives the
+same padded science footprint locally, downloads safe overlapping tiles, and
+reprojects them to a north-up TAN mosaic at the native survey pixel scale. The
+mosaic covers the complete science footprint; the normal pipeline remains
+responsible for its existing reference-to-science reprojection and subtraction.
+
+```powershell
+& $Python "scripts\prepare_survey_mosaic.py" --science "C:\data\science.fits" --survey panstarrs --template-filter r --cache "C:\cache\survey" --output "C:\data\prepared_reference"
+& $Python $PipelineScript --ref "C:\data\prepared_reference\survey_reference.fits" --new "C:\data\prepared_reference\science_for_reference.fits" --reproject --output "C:\results\mosaic_001"
+```
+
+The safe request widths are 24.9 arcminutes for Pan-STARRS and 9.8 arcminutes
+for SkyMapper, just below the provider ceilings. Tiles overlap by 10% and the
+preparer refuses completion if their combined valid coverage misses any science
+footprint pixel. `survey_mosaic.json` records the plan, tile metadata, output
+shape and warnings. The preparation directory must be new or empty and must be
+separate from the survey cache; it must not be the science input directory or
+an ancestor of it.
+
+When a padded field is only a little too large, the default is simpler: if it
+is within 5% of one safe tile, the preparer writes a **separate centred crop**
+as `science_for_reference.fits` and uses one reference cutout. This discards
+only the outer science region from that subsequent comparison; it never alters
+the original. Pass `--single-tile-overrun 0` to mosaic every oversized field,
+or select a value up to `0.25` for a deliberately larger crop tolerance.
+`--check-only` reports the local plan without downloading or writing files.
+
+The preparer preserves native reference headers and does not invent a zero
+point, gain, variance, unit conversion, filter transformation, or epoch
+certification. Pan-STARRS variance is mosaicked only when every tile supplies
+it; SkyMapper still needs a validated gain/noise model for a full subtraction.
+Before running the local pipeline, verify compatible count-space BUNIT/FILTER
+values and use the cross-filter precautions described here. Resampling and
+overlap make the noise correlated, so all candidates remain unconfirmed.
 
 **Verify native units before declaring `adu`.** Pan-STARRS cutouts can lack BUNIT;
 SkyMapper can label it `Data Value`. These ambiguous labels fail unless you provide
@@ -1159,7 +1194,7 @@ To see individual test names or investigate one behavior:
 & $Python -m pytest -c $Configuration $AstroTests -q -k properimage
 ```
 
-The current suite expands to 170 test cases, including parameterized invalid
+The current suite expands to 173 test cases, including parameterized invalid
 configuration and preflight checks. It covers:
 
 - Score calibration, preservation of bright sources, and invalid-pixel masks.

@@ -191,6 +191,27 @@ Only coordinates, cutout size, band and optional epoch are sent to the survey;
 science FITS pixels are never uploaded. See
 [the survey workflow guide](USER_GUIDE.md#automatic-survey-reference-workflow).
 
+### Large Survey Footprints (Standalone Preparer)
+
+The automatic `--survey` mode deliberately remains a one-cutout workflow. For
+a science footprint larger than a provider's request limit, prepare local inputs
+first, without changing the original science FITS or the pipeline:
+
+```powershell
+python scripts/prepare_survey_mosaic.py --science science.fits --survey panstarrs --template-filter r --cache survey_cache --output prepared_reference
+proper-transient-finder --ref prepared_reference/survey_reference.fits --new prepared_reference/science_for_reference.fits --reproject --output results/mosaic_001
+```
+
+The preparer uses 24.9-arcminute Pan-STARRS or 9.8-arcminute SkyMapper tiles,
+with overlap, and creates a native-survey-scale WCS mosaic covering the complete
+science footprint. It does not modify either input. If the padded footprint is
+at most 5% over a single safe tile, it instead makes a separate centred,
+WCS-preserving science crop and downloads one reference cutout. Set
+`--single-tile-overrun 0` to always mosaic an oversized field. Inspect the
+auditable `survey_mosaic.json` and retain the normal survey calibration and
+cross-filter cautions: mosaicking does not establish compatible units,
+passbands, epochs, or candidate reality.
+
 ## Medium FITS Robustness And Timing
 
 Run the standalone experiment from this project directory:
