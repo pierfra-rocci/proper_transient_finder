@@ -2753,9 +2753,7 @@ def plot_survey_validation(pipeline, sources, truth, metrics, blank_sky) -> None
 def test_realistic_survey_comparison_end_to_end(tmp_path) -> None:
     """Validate complete same-filter FITS subtraction against known injected truth."""
     paths, truth = realistic_survey_pair(tmp_path / "inputs")
-    pipeline = ProperTransientFinder(
-        *paths, tmp_path / "results", {"align": True, "psf_radius": 9}
-    )
+    pipeline = ProperTransientFinder(*paths, tmp_path / "results", {"align": True, "psf_radius": 9})
     sources = pipeline.run_full_pipeline(threshold_sigma=5.0)
     row_grid, column_grid = np.indices(pipeline.mask.shape)
     blank_sky = ~pipeline.mask.copy()
