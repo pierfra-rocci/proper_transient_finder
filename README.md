@@ -1,9 +1,5 @@
 # Proper Transient Finder
 
-**Author:** Pier-Francesco Rocci
-
-Developed with assistance from ChatGPT, Claude, and Mistral.
-
 **Compare two images of the sky to spot what changed.**
 
 Python library for PSF-matched FITS difference imaging and unconfirmed
@@ -323,6 +319,9 @@ quality job. If the project files ever move, update that setting and the script
 paths in the same commit. Package metadata points at
 <https://github.com/pierfra-rocci/proper_transient_finder> for source, issues,
 and documentation.
+
+**Author:** Pier-Francesco Rocci
+Developed with assistance from ChatGPT, Claude, and Mistral.
 
 ## License
 
