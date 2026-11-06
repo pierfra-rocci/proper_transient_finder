@@ -483,7 +483,10 @@ or select a value up to `0.25` for a deliberately larger crop tolerance.
 The preparer preserves native reference headers and does not invent a zero
 point, gain, variance, unit conversion, filter transformation, or epoch
 certification. Pan-STARRS variance is mosaicked only when every tile supplies
-it; SkyMapper still needs a validated gain/noise model for a full subtraction.
+it. Variance contributions follow the same valid science tiles; if a contributing
+tile has missing or invalid variance inside the science footprint, preparation
+fails rather than writing an incomplete variance plane. SkyMapper still needs a
+validated gain/noise model for a full subtraction.
 Before running the local pipeline, verify compatible count-space BUNIT/FILTER
 values and use the cross-filter precautions described here. Resampling and
 overlap make the noise correlated, so all candidates remain unconfirmed.
@@ -1194,7 +1197,7 @@ To see individual test names or investigate one behavior:
 & $Python -m pytest -c $Configuration $AstroTests -q -k properimage
 ```
 
-The current suite expands to 174 test cases, including parameterized invalid
+The current suite expands to 182 test cases, including parameterized invalid
 configuration and preflight checks. It covers:
 
 - Score calibration, preservation of bright sources, and invalid-pixel masks.
@@ -1236,7 +1239,8 @@ and confirm the tests execute and pass.
 FITS loading, background estimation, cosmic-ray masking, registration, automatic
 Gaussian PSF estimation, photometric scaling, subtraction, scoring, candidate
 vetting, catalogs, FITS products, and production diagnostic plots. No PSF or
-photometric scale is supplied to the pipeline.
+photometric scale is supplied to the pipeline. It uses the default PSF radius
+of 8 pixels, with full kernel and matched-filter support masked.
 
 The fixed-seed, 384 x 384 scene contains a sparse field of subpixel-positioned
 stars and two positive transients present only in the science exposure.

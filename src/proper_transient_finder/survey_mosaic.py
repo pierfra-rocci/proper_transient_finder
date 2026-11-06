@@ -190,10 +190,12 @@ def _crop_science(source: Path, destination: Path, bounds: tuple[int, int, int, 
     if not (0 <= row0 < row1 <= shape[0] and 0 <= column0 < column1 <= shape[1]):
         copied.close()
         raise ValueError("Invalid centred crop bounds")
-    for hdu in copied:
+    for index, hdu in enumerate(copied):
         data = getattr(hdu, "data", None)
-        if isinstance(data, np.ndarray) and data.ndim == 2 and data.shape == shape:
+        cropped_plane = isinstance(data, np.ndarray) and data.ndim == 2 and data.shape == shape
+        if cropped_plane:
             hdu.data = np.array(data[row0:row1, column0:column1], copy=True)
+        if cropped_plane or (index == 0 and data is None):
             if "CRPIX1" in hdu.header:
                 hdu.header["CRPIX1"] -= column0
             if "CRPIX2" in hdu.header:
@@ -317,6 +319,7 @@ def _write_mosaic(
     weights = np.zeros(shape, dtype=float)
     variance_sum = np.zeros(shape, dtype=float)
     variance_weights = np.zeros(shape, dtype=float)
+    missing_variance = np.zeros(shape, dtype=bool)
     all_variance = True
     for path in templates:
         data, header, variance, mask = _tile_image(path)
@@ -331,16 +334,23 @@ def _write_mosaic(
         if variance is None:
             all_variance = False
         else:
-            if mask is not None:
-                variance = np.where(mask == 0, variance, np.nan)
+            variance = np.where(
+                np.isfinite(data) & np.isfinite(variance) & (variance > 0), variance, np.nan
+            )
             projected_variance, variance_footprint = reproject_interp(
                 (variance, WCS(header).celestial), output_wcs, shape_out=shape, order="bilinear"
             )
-            variance_valid = np.isfinite(projected_variance) & (variance_footprint > 0)
-            variance_sum[variance_valid] += (
-                projected_variance[variance_valid] * variance_footprint[variance_valid]
+            variance_valid = (
+                valid
+                & np.isfinite(projected_variance)
+                & (projected_variance > 0)
+                & (variance_footprint > 0)
             )
-            variance_weights[variance_valid] += variance_footprint[variance_valid]
+            missing_variance |= valid & ~variance_valid
+            variance_sum[variance_valid] += (
+                projected_variance[variance_valid] * footprint[variance_valid]
+            )
+            variance_weights[variance_valid] += footprint[variance_valid]
     mosaic = np.full(shape, np.nan, dtype=float)
     valid = weights > 0
     mosaic[valid] = data_sum[valid] / weights[valid]
@@ -355,6 +365,9 @@ def _write_mosaic(
     required = (science_coverage > 0) & np.isfinite(science_footprint)
     if not np.all(valid[required]):
         raise ValueError("Downloaded survey tiles do not cover the complete science footprint")
+    variance_valid = (variance_weights > 0) & ~missing_variance
+    if all_variance and not np.all(variance_valid[required]):
+        raise ValueError("Survey tile variance is missing or invalid within the science footprint")
     header = first_header.copy()
     header.update(output_wcs.to_header(relax=True))
     header["NAXIS1"], header["NAXIS2"] = shape[1], shape[0]
@@ -362,10 +375,12 @@ def _write_mosaic(
     header["MTILES"] = (len(templates), "Number of downloaded survey tiles")
     header.add_history("Survey mosaic preparer combined overlapping survey cutouts.")
     hdus: list[fits.ImageHDU | fits.PrimaryHDU] = [fits.PrimaryHDU(mosaic, header)]
-    hdus.append(fits.ImageHDU((~valid).astype(np.uint8), name="MASK"))
-    if all_variance and np.all(variance_weights[required] > 0):
+    mask = ~valid
+    if all_variance:
+        mask |= ~variance_valid
+    hdus.append(fits.ImageHDU(mask.astype(np.uint8), name="MASK"))
+    if all_variance:
         variance_output = np.full(shape, np.nan, dtype=float)
-        variance_valid = variance_weights > 0
         variance_output[variance_valid] = (
             variance_sum[variance_valid] / variance_weights[variance_valid]
         )

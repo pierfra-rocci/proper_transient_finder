@@ -1,4 +1,6 @@
 include pyproject.toml README.md USER_GUIDE.md LICENSE run_proper_transient_finder.py mkdocs.yml
+include .gitattributes .github/workflows/proper-transient-finder.yml
+include .github/instructions/proper-transient-finder.instructions.md
 recursive-include src *.py py.typed
 recursive-include tests *.py
 recursive-include experiments *.py

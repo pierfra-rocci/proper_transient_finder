@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
+import tarfile
 import tomllib
 from pathlib import Path
 
@@ -68,15 +70,62 @@ def test_documented_test_count_matches_collected_suite() -> None:
 
 
 def test_documented_python_floor_matches_package_metadata() -> None:
-    """README and user guide must not advertise a floor other than requires-python."""
+    """Project guidance must not advertise a floor other than requires-python."""
     floor = python_floor()
-    for name in ("README.md", "USER_GUIDE.md"):
+    for name in (
+        "README.md",
+        "USER_GUIDE.md",
+        ".github/instructions/proper-transient-finder.instructions.md",
+    ):
         claims = claimed_versions(VERSION_CLAIM.pattern, read(name))
         assert claims, f"{name} must state the supported Python version"
         assert set(claims) == {floor}, (
             f"{name} claims Python versions {sorted(set(claims))}; "
             f"pyproject.toml declares 3.{floor[1]} or newer"
         )
+
+
+def test_project_instructions_match_repository_layout(tmp_path: Path) -> None:
+    """Instruction paths and automatic attachment must cover the current project."""
+    instructions = read(".github/instructions/proper-transient-finder.instructions.md")
+    frontmatter = instructions.split("---", 2)[1]
+    apply_to = re.search(r'^applyTo:\s*"([^"]+)"\s*$', frontmatter, re.MULTILINE)
+    assert apply_to is not None, "Project instructions must declare matching patterns"
+    expected = {
+        "run_proper_transient_finder.py",
+        "src/proper_transient_finder/astro.py",
+        "tests/test_survey_mosaic.py",
+        "experiments/robustness.py",
+        "scripts/generate_docs.py",
+        "scripts/lint.ps1",
+        "scripts/tasks.sh",
+        "pyproject.toml",
+        "MANIFEST.in",
+        "USER_GUIDE.md",
+    }
+    for path in expected:
+        assert (PROJECT_ROOT / path).is_file(), f"Expected project file {path} does not exist"
+    fixtures = expected | {"scripts/nested/check.ps1", "scripts/nested/check.sh"}
+    for path in fixtures:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.touch()
+    matched = {
+        path.relative_to(tmp_path).as_posix()
+        for pattern in apply_to.group(1).split(",")
+        for path in tmp_path.glob(pattern.strip())
+        if path.is_file()
+    }
+    assert fixtures <= matched, f"Instruction patterns miss {sorted(fixtures - matched)}"
+    for path in (
+        "src/proper_transient_finder",
+        "tests",
+        "scripts/lint.ps1",
+        "scripts/test.ps1",
+        "USER_GUIDE.md",
+    ):
+        assert f"`{path}`" in instructions, f"Project instructions must reference {path}"
+        assert (PROJECT_ROOT / path).exists(), f"Instruction path {path} does not exist"
 
 
 def test_ci_matrix_classifiers_and_wrapper_gates_agree() -> None:
@@ -128,3 +177,59 @@ def test_posix_task_script_is_checked_out_with_lf() -> None:
     task_script = PROJECT_ROOT / "scripts" / "tasks.sh"
     assert b"\r" not in task_script.read_bytes(), "tasks.sh must use LF line endings"
     assert "*.sh text eol=lf" in read(".gitattributes")
+
+
+def test_source_distribution_includes_repository_validation_inputs(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    for name in (
+        "pyproject.toml",
+        "MANIFEST.in",
+        "README.md",
+        "USER_GUIDE.md",
+        "LICENSE",
+        "mkdocs.yml",
+        "run_proper_transient_finder.py",
+        ".gitattributes",
+    ):
+        shutil.copy2(PROJECT_ROOT / name, source / name)
+    for name in (
+        "src",
+        "tests",
+        "experiments",
+        "scripts",
+        "docs",
+        ".github/workflows",
+        ".github/instructions",
+    ):
+        destination = source / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            PROJECT_ROOT / name,
+            destination,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.egg-info"),
+        )
+    dist = tmp_path / "dist"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--sdist",
+            "--no-isolation",
+            "--outdir",
+            str(dist),
+            str(source),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    with tarfile.open(next(dist.glob("*.tar.gz")), "r:gz") as archive:
+        names = {name.split("/", 1)[-1] for name in archive.getnames()}
+    assert {
+        ".gitattributes",
+        ".github/workflows/proper-transient-finder.yml",
+        ".github/instructions/proper-transient-finder.instructions.md",
+    } <= names
