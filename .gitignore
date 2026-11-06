@@ -34,3 +34,5 @@ survey_cache/
 *.fits
 *.fit
 freebuff*
+prepared_reference_retry/survey_mosaic.json
+prepared_reference_retry_2/survey_mosaic.json

@@ -531,6 +531,42 @@ def test_survey_download_rejects_oversized_response(monkeypatch, declared_length
         survey._download_url("https://ps1images.stsci.edu/image", 30, 10)
 
 
+def test_survey_download_explains_certificate_failure(monkeypatch):
+    import ssl
+    from types import SimpleNamespace
+    from urllib.error import URLError
+
+    from proper_transient_finder import survey
+
+    failure = URLError(ssl.SSLCertVerificationError("unable to get local issuer certificate"))
+
+    def fail(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(survey, "build_opener", lambda *args: SimpleNamespace(open=fail))
+    with pytest.raises(URLError, match="SSL_CERT_FILE") as caught:
+        survey._download_url("https://ps1images.stsci.edu/image", 30, 10)
+    assert caught.value.__cause__ is failure
+    assert "TLS verification" in str(caught.value)
+
+
+def test_survey_download_preserves_other_url_errors(monkeypatch):
+    from types import SimpleNamespace
+    from urllib.error import URLError
+
+    from proper_transient_finder import survey
+
+    failure = URLError("network unavailable")
+
+    def fail(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(survey, "build_opener", lambda *args: SimpleNamespace(open=fail))
+    with pytest.raises(URLError) as caught:
+        survey._download_url("https://ps1images.stsci.edu/image", 30, 10)
+    assert caught.value is failure
+
+
 def test_survey_redirect_rejects_external_host():
     from proper_transient_finder.survey import _SurveyRedirect
 

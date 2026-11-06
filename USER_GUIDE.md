@@ -578,6 +578,24 @@ TLS verification stays enabled. Default per-response timeout is 30 seconds; FITS
 products are limited to 64 MB each, configurable up to 512 MB. Discovery responses
 have a separate 4 MB limit. These are transfer limits, not full-run memory bounds.
 
+If a survey request fails with `CERTIFICATE_VERIFY_FAILED`, Python could not
+verify the server's certificate chain. Check the server and your system or
+network's trusted CA configuration. On Windows, if the public `certifi` CA bundle
+is appropriate for your network and is installed for the same Python interpreter,
+you can use it for the current PowerShell session:
+
+```powershell
+python -c "import certifi; print(certifi.where())"
+$env:SSL_CERT_FILE = python -c "import certifi; print(certifi.where())"
+```
+
+If the import fails, install `certifi` using your approved package index, or use
+a trusted CA bundle supplied by your administrator. `SSL_CERT_FILE` selects that
+bundle instead of the default CA file; networks using private CAs may require a
+bundle that also includes those CAs. Never disable TLS verification. The mosaic
+preparer may leave a failed report and science copy in its output directory;
+retry with a new, empty `--output` directory and the same cache.
+
 The cache defaults to `survey_cache/`, relative to the working directory. Hashed FITS
 files have JSON manifests, source URLs, image IDs, native labels/units/epochs and
 SHA-256 fingerprints. A cache hit verifies the FITS hash; corruption fails rather
@@ -1199,7 +1217,7 @@ To see individual test names or investigate one behavior:
 & $Python -m pytest -c $Configuration $AstroTests -q -k properimage
 ```
 
-The current suite expands to 183 test cases, including parameterized invalid
+The current suite expands to 185 test cases, including parameterized invalid
 configuration and preflight checks. It covers:
 
 - Score calibration, preservation of bright sources, and invalid-pixel masks.

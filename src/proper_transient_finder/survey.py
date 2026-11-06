@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ssl
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
 from io import BytesIO
@@ -14,6 +15,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
+from urllib.error import URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -169,11 +171,21 @@ class _SurveyRedirect(HTTPRedirectHandler):
 def _download_url(url: str, timeout: float, limit: int) -> bytes:
     _validate_url(url)
     request = Request(url, headers={"User-Agent": "ProperTransientFinder/0.1"})
-    with build_opener(_SurveyRedirect()).open(request, timeout=timeout) as response:
-        length = response.headers.get("Content-Length")
-        if length is not None and int(length) > limit:
-            raise ValueError("Survey response exceeds the download size limit")
-        payload = response.read(limit + 1)
+    try:
+        with build_opener(_SurveyRedirect()).open(request, timeout=timeout) as response:
+            length = response.headers.get("Content-Length")
+            if length is not None and int(length) > limit:
+                raise ValueError("Survey response exceeds the download size limit")
+            payload = response.read(limit + 1)
+    except URLError as error:
+        if not isinstance(error.reason, ssl.SSLCertVerificationError):
+            raise
+        raise URLError(
+            f"Survey TLS certificate verification failed: {error.reason}. "
+            "Check the server certificate chain and your trusted CA certificates, or set "
+            "SSL_CERT_FILE to a trusted CA bundle. See USER_GUIDE.md. "
+            "Do not disable TLS verification."
+        ) from error
     if len(payload) > limit:
         raise ValueError("Survey response exceeds the download size limit")
     return payload
