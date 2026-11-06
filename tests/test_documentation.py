@@ -172,6 +172,29 @@ def test_api_reference_header_matches_public_version() -> None:
     assert "scripts/docs.ps1" in header and "scripts/tasks.sh docs" in header
 
 
+def test_documented_release_artifacts_match_public_version() -> None:
+    """Release labels and distribution examples must use the package version."""
+    import proper_transient_finder as package
+
+    documents = (
+        ("README.md", "Current release", {"-py3-none-any.whl"}),
+        ("USER_GUIDE.md", "Version", {"-py3-none-any.whl", ".tar.gz"}),
+    )
+    for name, label, expected_suffixes in documents:
+        text = read(name)
+        assert f"{label}: `{package.__version__}`" in text, f"{name} has a stale release label"
+        examples = re.findall(
+            r'proper_transient_finder-([^\s/\\`"]+?)(-py3-none-any\.whl|\.tar\.gz)',
+            text,
+        )
+        assert {suffix for _, suffix in examples} >= expected_suffixes, (
+            f"{name} must include the expected distribution examples"
+        )
+        assert {version for version, _ in examples} == {package.__version__}, (
+            f"{name} contains stale distribution filenames: {examples}"
+        )
+
+
 def test_posix_task_script_is_checked_out_with_lf() -> None:
     """Keep bash source free of carriage returns on Linux and macOS runners."""
     task_script = PROJECT_ROOT / "scripts" / "tasks.sh"
