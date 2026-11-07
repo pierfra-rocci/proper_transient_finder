@@ -6,8 +6,8 @@
 The module is deliberately a pre-processing utility.  It downloads bounded
 Pan-STARRS or SkyMapper cutouts through the existing validated acquisition
 code, mosaics them onto a native-survey-scale TAN grid, and writes a separate
-science copy only when a small centred crop avoids an otherwise needless tile
-mosaic.  The normal pipeline still performs the scientific reprojection.
+science copy.  Cropping and incomplete mosaic coverage can be explicitly
+requested.  The normal pipeline still performs the scientific reprojection.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import json
 import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Literal
 
 import numpy as np
@@ -59,6 +59,8 @@ class MosaicPlan:
     tile_limit_deg: float
     mode: Literal["single", "crop", "mosaic"]
     crop_bounds: tuple[int, int, int, int] | None = None
+    border_crop_fraction: float = 0.0
+    border_crop_bounds: tuple[int, int, int, int] | None = None
 
     def to_dict(self) -> dict:
         value = asdict(self)
@@ -120,19 +122,35 @@ def plan_survey_mosaic(
     survey: str = "auto",
     science_filter: str | None = None,
     single_tile_overrun: float = 0.05,
+    border_crop_fraction: float = 0.0,
 ) -> MosaicPlan:
     """Plan a non-mutating survey-reference preparation operation.
 
     A science field up to five percent larger than one safe survey request is
     cropped centrally by default.  Larger fields use overlapping tiles.  This
     threshold is explicit so callers can set it to zero to always mosaic.
+    An explicit border crop disables the additional automatic crop.
     """
     if survey not in {"auto", *SURVEY_FILTERS}:
         raise ValueError("Survey must be auto, panstarrs, or skymapper")
     if not np.isfinite(single_tile_overrun) or not 0 <= single_tile_overrun <= 0.25:
         raise ValueError("single_tile_overrun must be between zero and 0.25")
+    if not np.isfinite(border_crop_fraction) or not 0 <= border_crop_fraction <= 0.25:
+        raise ValueError("border_crop_fraction must be between zero and 0.25 per edge")
     path = Path(science_fits).expanduser().resolve()
     header, shape = _science_header_and_shape(path)
+    border_bounds = None
+    if border_crop_fraction:
+        height, width = shape
+        row0, column0 = int(height * border_crop_fraction), int(width * border_crop_fraction)
+        border_bounds = (row0, height - row0, column0, width - column0)
+        for key, offset in (("CRPIX1", column0), ("CRPIX2", row0)):
+            if key in header:
+                value = header[key]
+                if not isinstance(value, (int, float)):
+                    raise ValueError(f"{key} must be numeric for a science crop")
+                header[key] = value - offset
+        shape = (height - 2 * row0, width - 2 * column0)
     wcs = WCS(header)
     if wcs.pixel_n_dim != 2 or not wcs.has_celestial:
         raise ValueError("Survey references require valid two-dimensional celestial WCS")
@@ -153,7 +171,7 @@ def plan_survey_mosaic(
     bounds = None
     if size <= limit:
         mode = "single"
-    elif size <= limit * (1 + single_tile_overrun):
+    elif not border_crop_fraction and size <= limit * (1 + single_tile_overrun):
         mode = "crop"
         # A proportional, centred crop leaves a rounding margin below the
         # request limit.  It is refined before downloading in execute_plan.
@@ -178,6 +196,8 @@ def plan_survey_mosaic(
         limit,
         mode,
         bounds,
+        border_crop_fraction,
+        border_bounds,
     )
 
 
@@ -307,7 +327,11 @@ def _write_mosaic(
     science_header: fits.Header,
     science_shape: tuple[int, int],
     destination: Path,
+    *,
+    max_missing_fraction: float = 0.0,
 ) -> dict:
+    if not np.isfinite(max_missing_fraction) or not 0 <= max_missing_fraction <= 0.1:
+        raise ValueError("max_missing_fraction must be between zero and 0.1")
     _, first_header, _, _ = _tile_image(templates[0])
     source_wcs = WCS(first_header).celestial
     scales = proj_plane_pixel_scales(source_wcs)
@@ -363,11 +387,26 @@ def _write_mosaic(
         order="nearest-neighbor",
     )
     required = (science_coverage > 0) & np.isfinite(science_footprint)
-    if not np.all(valid[required]):
-        raise ValueError("Downloaded survey tiles do not cover the complete science footprint")
     variance_valid = (variance_weights > 0) & ~missing_variance
-    if all_variance and not np.all(variance_valid[required]):
+    if all_variance and not np.all(variance_valid[required & valid]):
         raise ValueError("Survey tile variance is missing or invalid within the science footprint")
+    if max_missing_fraction == 0 and not np.all(valid[required]):
+        raise ValueError("Downloaded survey tiles do not cover the complete science footprint")
+    usable = valid & variance_valid if all_variance else valid
+    science_valid, science_valid_footprint = reproject_interp(
+        (np.where(usable, np.float32(1), np.float32(np.nan)), output_wcs),
+        WCS(science_header).celestial,
+        shape_out=science_shape,
+        order="bilinear",
+    )
+    covered = np.isfinite(science_valid) & (science_valid > 0.5) & (science_valid_footprint > 0)
+    missing_count = int(np.count_nonzero(~covered))
+    missing_fraction = missing_count / covered.size
+    if missing_fraction > max_missing_fraction:
+        raise ValueError(
+            f"Survey coverage misses {missing_fraction:.2%} of science pixels; "
+            f"the permitted maximum is {max_missing_fraction:.2%}"
+        )
     header = first_header.copy()
     header.update(output_wcs.to_header(relax=True))
     header["NAXIS1"], header["NAXIS2"] = shape[1], shape[0]
@@ -397,6 +436,9 @@ def _write_mosaic(
         "mosaic_pixel_scale_arcsec": scale_deg * 3600,
         "tiles": len(templates),
         "variance_plane": all_variance,
+        "missing_science_pixels": missing_count,
+        "science_pixels": int(np.prod(science_shape)),
+        "missing_science_fraction": missing_count / int(np.prod(science_shape)),
     }
 
 
@@ -411,22 +453,45 @@ def prepare_survey_mosaic(
     timeout: float = 30,
     max_download_mb: float = 64,
     single_tile_overrun: float = 0.05,
+    border_crop_fraction: float = 0.0,
+    max_missing_fraction: float = 0.0,
     check_only: bool = False,
+    overwrite: bool = False,
 ) -> dict:
     """Write local reference/science FITS inputs for the unchanged pipeline.
 
-    The output directory must be new or empty.  It contains
+    The output directory must be new or empty unless ``overwrite`` is enabled. It contains
     ``science_for_reference.fits``, ``survey_reference.fits``, and an auditable
     ``survey_mosaic.json`` plan.  ``check_only`` only derives the local plan.
     """
+    if not np.isfinite(max_missing_fraction) or not 0 <= max_missing_fraction <= 0.1:
+        raise ValueError("max_missing_fraction must be between zero and 0.1")
     plan = plan_survey_mosaic(
         science_fits,
         template_filter,
         survey=survey,
         science_filter=science_filter,
         single_tile_overrun=single_tile_overrun,
+        border_crop_fraction=border_crop_fraction,
     )
-    result = {"plan": plan.to_dict(), "output_written": False, "network_used": False}
+    warnings = []
+    if plan.border_crop_bounds is not None:
+        warnings.append(
+            "The science image will be cropped at the user's request; "
+            "sources outside the retained region cannot be detected."
+        )
+    if max_missing_fraction and plan.mode != "mosaic":
+        warnings.append(
+            "max_missing_fraction applies only to tiled mosaics; "
+            "single-cutout coverage is not checked against this limit."
+        )
+    result = {
+        "plan": plan.to_dict(),
+        "max_missing_fraction": max_missing_fraction,
+        "output_written": False,
+        "network_used": False,
+        "warnings": warnings,
+    }
     if check_only:
         return result
     root = Path(output_dir).expanduser().resolve()
@@ -435,15 +500,56 @@ def prepare_survey_mosaic(
         raise ValueError("Survey cache and mosaic output directories must be separate")
     if root == plan.science_fits.parent or root in plan.science_fits.parents:
         raise ValueError("Mosaic output must not contain the science input")
-    if root.exists() and (not root.is_dir() or any(root.iterdir())):
-        raise FileExistsError("Mosaic output directory must be new or empty")
+    if root.exists() and not root.is_dir():
+        raise FileExistsError("Mosaic output must be a directory")
+    if root.exists() and any(root.iterdir()):
+        if not overwrite:
+            raise FileExistsError("Mosaic output directory must be new or empty; use --overwrite")
+        for name in ("science_for_reference.fits", "survey_reference.fits", "survey_mosaic.json"):
+            target = root / name
+            if target.is_symlink() or (target.exists() and not target.is_file()):
+                raise ValueError(f"Mosaic output target must be a regular file: {name}")
+        with TemporaryDirectory(prefix=".survey-mosaic-", dir=root) as temporary:
+            staged = Path(temporary)
+            report = prepare_survey_mosaic(
+                science_fits,
+                staged,
+                template_filter=template_filter,
+                survey=survey,
+                cache_dir=cache,
+                science_filter=science_filter,
+                timeout=timeout,
+                max_download_mb=max_download_mb,
+                single_tile_overrun=single_tile_overrun,
+                border_crop_fraction=border_crop_fraction,
+                max_missing_fraction=max_missing_fraction,
+            )
+            report["science_fits"] = str(root / "science_for_reference.fits")
+            report["reference_fits"] = str(root / "survey_reference.fits")
+            manifest = root / "survey_mosaic.json"
+            atomic_json(manifest, {**report, "state": "in_progress", "output_written": False})
+            try:
+                for name in ("science_for_reference.fits", "survey_reference.fits"):
+                    (staged / name).replace(root / name)
+                atomic_json(manifest, report)
+            except OSError as error:
+                atomic_json(
+                    manifest,
+                    {**report, "state": "failed", "output_written": False, "error": str(error)},
+                )
+                raise
+            return report
     root.mkdir(parents=True, exist_ok=True)
     science_output = root / "science_for_reference.fits"
     reference_output = root / "survey_reference.fits"
     try:
+        if plan.border_crop_bounds is not None:
+            _crop_science(plan.science_fits, science_output, plan.border_crop_bounds)
+        else:
+            _copy_fits(plan.science_fits, science_output)
         if plan.mode == "crop":
             assert plan.crop_bounds is not None
-            _crop_science(plan.science_fits, science_output, plan.crop_bounds)
+            _crop_science(science_output, science_output, plan.crop_bounds)
             # Re-evaluate the exact cropped WCS and shrink once more if FITS
             # integer rounding left it at the provider's limit.
             request = prepare_template_request(
@@ -471,7 +577,6 @@ def prepare_survey_mosaic(
                     science_filter=plan.science_filter,
                 )
         else:
-            _copy_fits(plan.science_fits, science_output)
             request = None
         if plan.mode in {"single", "crop"}:
             if request is None:
@@ -508,7 +613,11 @@ def prepare_survey_mosaic(
                 for item in requests
             ]
             acquisition = _write_mosaic(
-                [item.fits_path for item in templates], header, shape, reference_output
+                [item.fits_path for item in templates],
+                header,
+                shape,
+                reference_output,
+                max_missing_fraction=max_missing_fraction,
             )
             acquisition["tile_metadata"] = [item.metadata for item in templates]
         result.update(
@@ -518,11 +627,17 @@ def prepare_survey_mosaic(
             reference_fits=str(reference_output),
             acquisition=acquisition,
             warnings=[
+                *warnings,
                 SURVEY_WARNING,
                 "Run the normal pipeline with --ref/--new --reproject; tiled mosaics are "
                 "resampled survey data.",
             ],
         )
+        if acquisition.get("missing_science_pixels", 0):
+            result["warnings"].append(
+                "Some science pixels have no valid survey coverage and are masked; "
+                "sources in those regions cannot be detected."
+            )
         atomic_json(root / "survey_mosaic.json", result)
         return result
     except Exception as error:
@@ -534,13 +649,27 @@ def main(argv: list[str] | None = None) -> int:
     """Run the standalone mosaic preparer from a source checkout or package."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--science", required=True, help="Science FITS with celestial WCS")
-    parser.add_argument("--output", required=True, help="New/empty preparation output directory")
+    parser.add_argument("--output", required=True, help="Preparation output directory")
     parser.add_argument("--template-filter", required=True, help="One survey reference band")
     parser.add_argument("--survey", choices=("auto", "panstarrs", "skymapper"), default="auto")
     parser.add_argument("--cache", default="survey_cache", help="Separate survey download cache")
     parser.add_argument("--science-filter", help="Override missing/ambiguous science FILTER")
     parser.add_argument("--timeout", type=float, default=30)
     parser.add_argument("--max-download-mb", type=float, default=64)
+    parser.add_argument(
+        "--crop-border-percent",
+        type=float,
+        nargs="?",
+        const=5.0,
+        default=0.0,
+        help="Crop this percentage from each science-image edge before download (flag alone: 5)",
+    )
+    parser.add_argument(
+        "--max-missing-fraction",
+        type=float,
+        default=0.0,
+        help="Maximum uncovered science-pixel fraction in a mosaic (0 to 0.1; default: 0)",
+    )
     parser.add_argument(
         "--single-tile-overrun",
         type=float,
@@ -549,6 +678,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--check-only", action="store_true", help="Plan locally without downloads/writes"
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace existing preparer outputs after successful preparation",
     )
     args = parser.parse_args(argv)
     report = prepare_survey_mosaic(
@@ -561,7 +695,10 @@ def main(argv: list[str] | None = None) -> int:
         timeout=args.timeout,
         max_download_mb=args.max_download_mb,
         single_tile_overrun=args.single_tile_overrun,
+        border_crop_fraction=args.crop_border_percent / 100,
+        max_missing_fraction=args.max_missing_fraction,
         check_only=args.check_only,
+        overwrite=args.overwrite,
     )
     print(json.dumps(report, indent=2, sort_keys=True, default=str))
     return 0

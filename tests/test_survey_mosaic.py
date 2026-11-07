@@ -143,6 +143,333 @@ def test_preparer_tiles_and_mosaics_large_field(tmp_path, monkeypatch) -> None:
         assert np.all(hdus["MASK"].data[np.isfinite(hdus[0].data)] == 0)
 
 
+def test_preparer_overwrite_is_opt_in_and_preserves_unrelated_files(tmp_path, monkeypatch) -> None:
+    import json
+
+    from proper_transient_finder import survey_mosaic
+
+    science = tmp_path / "science.fits"
+    _science(science, 100, 1)
+    output = tmp_path / "prepared"
+    output.mkdir()
+    (output / "science_for_reference.fits").write_bytes(b"old science")
+    (output / "survey_reference.fits").write_bytes(b"old reference")
+    (output / "survey_mosaic.json").write_text('{"state":"old"}', encoding="utf-8")
+    unrelated = output / "notes.txt"
+    unrelated.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(survey_mosaic, "fetch_survey_template", _fake_fetch(tmp_path))
+
+    options = {"template_filter": "r", "survey": "panstarrs", "cache_dir": tmp_path / "cache"}
+    with pytest.raises(FileExistsError, match="overwrite"):
+        survey_mosaic.prepare_survey_mosaic(science, output, **options)
+    assert (output / "survey_reference.fits").read_bytes() == b"old reference"
+
+    report = survey_mosaic.prepare_survey_mosaic(science, output, overwrite=True, **options)
+    assert report["science_fits"] == str(output / "science_for_reference.fits")
+    assert report["reference_fits"] == str(output / "survey_reference.fits")
+    assert fits.getdata(report["reference_fits"]).shape
+    assert unrelated.read_text(encoding="utf-8") == "keep"
+    assert json.loads((output / "survey_mosaic.json").read_text(encoding="utf-8")) == report
+    assert not list(output.glob(".survey-mosaic-*"))
+
+
+def test_failed_preparer_overwrite_preserves_previous_products(tmp_path, monkeypatch) -> None:
+    from proper_transient_finder import survey_mosaic
+
+    science = tmp_path / "science.fits"
+    _science(science, 100, 1)
+    output = tmp_path / "prepared"
+    output.mkdir()
+    old_files = {
+        "science_for_reference.fits": b"old science",
+        "survey_reference.fits": b"old reference",
+        "survey_mosaic.json": b'{"state":"completed"}',
+    }
+    for name, payload in old_files.items():
+        (output / name).write_bytes(payload)
+
+    def fail(*args, **kwargs):
+        raise TimeoutError("mock survey timeout")
+
+    monkeypatch.setattr(survey_mosaic, "fetch_survey_template", fail)
+    with pytest.raises(TimeoutError, match="mock survey timeout"):
+        survey_mosaic.prepare_survey_mosaic(
+            science,
+            output,
+            template_filter="r",
+            survey="panstarrs",
+            cache_dir=tmp_path / "cache",
+            overwrite=True,
+        )
+    assert {name: (output / name).read_bytes() for name in old_files} == old_files
+    assert not list(output.glob(".survey-mosaic-*"))
+
+
+def test_preparer_overwrite_marks_failed_promotion(tmp_path, monkeypatch) -> None:
+    import json
+
+    from proper_transient_finder import survey_mosaic
+
+    science = tmp_path / "science.fits"
+    _science(science, 100, 1)
+    output = tmp_path / "prepared"
+    output.mkdir()
+    (output / "survey_reference.fits").write_bytes(b"old reference")
+    (output / "survey_mosaic.json").write_text('{"state":"completed"}', encoding="utf-8")
+    monkeypatch.setattr(survey_mosaic, "fetch_survey_template", _fake_fetch(tmp_path))
+    replace = Path.replace
+
+    def fail_reference_replace(path, target):
+        if Path(target) == output / "survey_reference.fits":
+            raise PermissionError("mock locked reference")
+        return replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", fail_reference_replace)
+    with pytest.raises(PermissionError, match="mock locked reference"):
+        survey_mosaic.prepare_survey_mosaic(
+            science,
+            output,
+            template_filter="r",
+            survey="panstarrs",
+            cache_dir=tmp_path / "cache",
+            overwrite=True,
+        )
+    report = json.loads((output / "survey_mosaic.json").read_text(encoding="utf-8"))
+    assert report["state"] == "failed"
+    assert report["output_written"] is False
+    assert (output / "survey_reference.fits").read_bytes() == b"old reference"
+
+
+def test_preparer_cli_overwrite_reuses_output_directory(tmp_path, monkeypatch, capsys) -> None:
+    import json
+
+    from proper_transient_finder import survey_mosaic
+
+    science = tmp_path / "science.fits"
+    _science(science, 100, 1)
+    output = tmp_path / "prepared"
+    output.mkdir()
+    (output / "survey_mosaic.json").write_text('{"state":"failed"}', encoding="utf-8")
+    monkeypatch.setattr(survey_mosaic, "fetch_survey_template", _fake_fetch(tmp_path))
+    assert (
+        survey_mosaic.main(
+            [
+                "--science",
+                str(science),
+                "--output",
+                str(output),
+                "--template-filter",
+                "r",
+                "--cache",
+                str(tmp_path / "cache"),
+                "--overwrite",
+            ]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["output_written"] is True
+    assert report["reference_fits"] == str(output / "survey_reference.fits")
+
+
+def test_preparer_overwrite_refuses_directory_at_product_path(tmp_path) -> None:
+    from proper_transient_finder import survey_mosaic
+
+    science = tmp_path / "science.fits"
+    _science(science, 100, 1)
+    output = tmp_path / "prepared"
+    (output / "survey_reference.fits").mkdir(parents=True)
+    marker = output / "survey_reference.fits" / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+    with pytest.raises(ValueError, match="regular file"):
+        survey_mosaic.prepare_survey_mosaic(
+            science,
+            output,
+            template_filter="r",
+            cache_dir=tmp_path / "cache",
+            overwrite=True,
+        )
+    assert marker.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize("wcs_in_empty_primary", [False, True])
+def test_opt_in_border_crop_plans_before_download_and_preserves_input(
+    tmp_path, monkeypatch, wcs_in_empty_primary
+) -> None:
+    from proper_transient_finder import survey_mosaic
+
+    science = tmp_path / "science.fits"
+    _science(science, 100, 1, wcs_in_empty_primary=wcs_in_empty_primary)
+    original = science.read_bytes()
+    options = {
+        "template_filter": "r",
+        "survey": "panstarrs",
+        "cache_dir": tmp_path / "cache",
+        "border_crop_fraction": 0.05,
+    }
+    preflight = survey_mosaic.prepare_survey_mosaic(
+        science, tmp_path / "prepared", check_only=True, **options
+    )
+    assert preflight["plan"]["border_crop_bounds"] == (5, 95, 5, 95)
+    assert not (tmp_path / "prepared").exists()
+    fake_fetch = _fake_fetch(tmp_path)
+
+    def fetch(request, cache_dir, **kwargs):
+        _, shape = survey_mosaic._science_header_and_shape(request.science_fits)
+        assert shape == (90, 90)
+        return fake_fetch(request, cache_dir, **kwargs)
+
+    monkeypatch.setattr(survey_mosaic, "fetch_survey_template", fetch)
+    result = survey_mosaic.prepare_survey_mosaic(science, tmp_path / "prepared", **options)
+    assert science.read_bytes() == original
+    assert result["plan"] == preflight["plan"]
+    assert survey_mosaic._science_header_and_shape(Path(result["science_fits"]))[1] == (90, 90)
+    assert any("cropped" in warning for warning in result["warnings"])
+
+
+def test_border_crop_does_not_trigger_additional_automatic_crop(tmp_path) -> None:
+    from proper_transient_finder.survey_mosaic import plan_survey_mosaic
+
+    science = tmp_path / "science.fits"
+    _science(science, 1100, 1)
+    plan = plan_survey_mosaic(science, "r", survey="panstarrs", border_crop_fraction=0.05)
+
+    assert plan.tile_limit_deg < plan.size_deg < plan.tile_limit_deg * 1.05
+    assert plan.mode == "mosaic"
+    assert plan.crop_bounds is None
+    assert plan.border_crop_bounds == (55, 1045, 55, 1045)
+
+
+def test_cli_preflight_reports_opt_in_crop_and_missing_limit(tmp_path, capsys) -> None:
+    import json
+
+    from proper_transient_finder.survey_mosaic import main
+
+    science = tmp_path / "science.fits"
+    _science(science, 100, 1)
+    assert (
+        main(
+            [
+                "--science",
+                str(science),
+                "--output",
+                str(tmp_path / "output"),
+                "--template-filter",
+                "r",
+                "--crop-border-percent",
+                "--max-missing-fraction",
+                "0.1",
+                "--check-only",
+            ]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["plan"]["border_crop_bounds"] == [5, 95, 5, 95]
+    assert report["max_missing_fraction"] == 0.1
+    assert any("single-cutout coverage" in warning for warning in report["warnings"])
+    assert not (tmp_path / "output").exists()
+
+
+@pytest.mark.parametrize("fraction", [-0.01, 0.251, float("nan")])
+def test_border_crop_rejects_invalid_fraction_before_writes(tmp_path, fraction) -> None:
+    from proper_transient_finder.survey_mosaic import prepare_survey_mosaic
+
+    science = tmp_path / "science.fits"
+    _science(science, 100, 1)
+    with pytest.raises(ValueError, match="border_crop_fraction"):
+        prepare_survey_mosaic(
+            science, tmp_path / "output", template_filter="r", border_crop_fraction=fraction
+        )
+    assert not (tmp_path / "output").exists()
+
+
+def test_partial_mosaic_coverage_enforces_exact_fraction_and_masks_gaps(tmp_path) -> None:
+    from proper_transient_finder.survey_mosaic import _write_mosaic
+
+    science = tmp_path / "science.fits"
+    _science(science, 32, 1)
+    data = np.full((80, 80), 10.0)
+    data[39:41, 39:41] = np.nan
+    tile = tmp_path / "tile.fits"
+    _tile(tile, data, np.ones((80, 80)))
+    header = fits.getheader(science)
+
+    with pytest.raises(ValueError, match="complete science footprint"):
+        _write_mosaic([tile], header, (32, 32), tmp_path / "strict.fits")
+    report = _write_mosaic(
+        [tile], header, (32, 32), tmp_path / "partial.fits", max_missing_fraction=0.1
+    )
+    fraction = report["missing_science_fraction"]
+    assert 0 < fraction < 0.1
+    assert report["missing_science_pixels"] / 1024 == fraction
+    with fits.open(tmp_path / "partial.fits") as hdus:
+        assert np.any(hdus["MASK"].data != 0)
+        assert np.all(np.isnan(hdus[0].data[hdus["MASK"].data != 0]))
+    _write_mosaic(
+        [tile], header, (32, 32), tmp_path / "boundary.fits", max_missing_fraction=fraction
+    )
+    with pytest.raises(ValueError, match="permitted maximum"):
+        _write_mosaic(
+            [tile],
+            header,
+            (32, 32),
+            tmp_path / "rejected.fits",
+            max_missing_fraction=fraction - 1 / 1024,
+        )
+    assert not (tmp_path / "rejected.fits").exists()
+
+
+@pytest.mark.parametrize("missing", [10, 11])
+def test_partial_mosaic_enforces_ten_percent_boundary(tmp_path, monkeypatch, missing) -> None:
+    from proper_transient_finder import survey_mosaic
+
+    science = tmp_path / "science.fits"
+    tile = tmp_path / "tile.fits"
+    _science(science, 10, 1)
+    _tile(tile, np.ones((10, 10)), None)
+    header = fits.getheader(science)
+    monkeypatch.setattr(survey_mosaic, "_mosaic_wcs", lambda wcs, shape, scale: (wcs, shape))
+    calls = 0
+
+    def project(source, output_wcs, *, shape_out, order):
+        nonlocal calls
+        calls += 1
+        data = np.array(source[0], dtype=float, copy=True)
+        if calls == 1:
+            data.flat[:missing] = np.nan
+        return data, np.ones(shape_out)
+
+    monkeypatch.setattr(survey_mosaic, "reproject_interp", project)
+    destination = tmp_path / "result.fits"
+    if missing == 10:
+        report = survey_mosaic._write_mosaic(
+            [tile], header, (10, 10), destination, max_missing_fraction=0.1
+        )
+        assert report["missing_science_fraction"] == 0.1
+        with fits.open(destination) as hdus:
+            assert np.count_nonzero(hdus["MASK"].data) == 10
+    else:
+        with pytest.raises(ValueError, match="11.00%"):
+            survey_mosaic._write_mosaic(
+                [tile], header, (10, 10), destination, max_missing_fraction=0.1
+            )
+        assert not destination.exists()
+
+
+@pytest.mark.parametrize("fraction", [-0.01, 0.101, float("nan")])
+def test_missing_coverage_rejects_invalid_fraction_before_writes(tmp_path, fraction) -> None:
+    from proper_transient_finder.survey_mosaic import prepare_survey_mosaic
+
+    science = tmp_path / "science.fits"
+    _science(science, 100, 1)
+    with pytest.raises(ValueError, match="max_missing_fraction"):
+        prepare_survey_mosaic(
+            science, tmp_path / "output", template_filter="r", max_missing_fraction=fraction
+        )
+    assert not (tmp_path / "output").exists()
+
+
 @pytest.mark.parametrize("science_has_wcs", [False, True])
 def test_crop_preserves_primary_and_science_extension_wcs(tmp_path, science_has_wcs) -> None:
     from proper_transient_finder.survey_mosaic import _crop_science, _science_header_and_shape
@@ -214,7 +541,13 @@ def test_mosaic_rejects_missing_variance_for_valid_science(tmp_path) -> None:
 
     destination = tmp_path / "mosaic.fits"
     with pytest.raises(ValueError, match="variance is missing or invalid"):
-        _write_mosaic([first, second], fits.getheader(science), (32, 32), destination)
+        _write_mosaic(
+            [first, second],
+            fits.getheader(science),
+            (32, 32),
+            destination,
+            max_missing_fraction=0.1,
+        )
     assert not destination.exists()
 
 

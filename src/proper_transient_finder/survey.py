@@ -16,7 +16,7 @@ from tempfile import NamedTemporaryFile
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 from urllib.error import URLError
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import numpy as np
@@ -282,6 +282,79 @@ def _fits_image(payload: bytes) -> tuple[np.ndarray, fits.Header]:
         return np.array(image.data, copy=True), header
 
 
+def _panstarrs_native_mask(
+    cutout_url: str,
+    image_header: fits.Header,
+    image_shape: tuple[int, int],
+    timeout: float,
+    limit: int,
+) -> tuple[np.ndarray, str]:
+    _validate_url(cutout_url)
+    parsed = urlsplit(cutout_url)
+    names = parse_qs(parsed.query).get("red", [])
+    if (
+        parsed.hostname != "ps1images.stsci.edu"
+        or parsed.path != "/cgi-bin/fitscut.cgi"
+        or len(names) != 1
+        or not names[0].endswith(".mask.fits")
+        or any(part in {".", ".."} for part in names[0].split("/"))
+    ):
+        raise ValueError("Invalid Pan-STARRS native mask filename")
+    raw_url = "https://ps1images.stsci.edu/" + quote(names[0].lstrip("/"), safe="/")
+    native, native_header = _fits_image(_download_url(raw_url, timeout, limit))
+    if native.ndim != 2 or native.dtype.kind not in "ui":
+        raise ValueError("Pan-STARRS native mask is not a two-dimensional integer bitmask")
+    if native.size == 0 or np.min(native) < 0 or np.max(native) > 65535:
+        raise ValueError("Pan-STARRS native mask contains invalid bit values")
+    height, width = image_shape
+    columns = np.array([0, (width - 1) / 2, width - 1] * 3)
+    rows = np.repeat([0, (height - 1) / 2, height - 1], 3)
+    world = WCS(image_header).celestial.all_pix2world(columns, rows, 0)
+    native_columns, native_rows = WCS(native_header).celestial.all_world2pix(*world, 0)
+    offsets_x, offsets_y = native_columns - columns, native_rows - rows
+    if not np.all(np.isfinite(offsets_x)) or not np.all(np.isfinite(offsets_y)):
+        raise ValueError("Pan-STARRS native mask WCS cannot be aligned to the cutout")
+    offset_x, offset_y = int(round(float(offsets_x[0]))), int(round(float(offsets_y[0])))
+    if not (
+        np.allclose(offsets_x, offset_x, atol=1e-3, rtol=0)
+        and np.allclose(offsets_y, offset_y, atol=1e-3, rtol=0)
+    ):
+        raise ValueError("Pan-STARRS native mask is not pixel-aligned with the cutout")
+    result = np.full(image_shape, 65535, dtype=np.uint16)
+    x0, y0 = max(0, -offset_x), max(0, -offset_y)
+    x1, y1 = min(width, native.shape[1] - offset_x), min(height, native.shape[0] - offset_y)
+    if x0 < x1 and y0 < y1:
+        result[y0:y1, x0:x1] = native[y0 + offset_y : y1 + offset_y, x0 + offset_x : x1 + offset_x]
+    return result, raw_url
+
+
+def _cached_template(path: Path, manifest: Path) -> SurveyTemplate | None:
+    if not path.is_file() or not manifest.is_file():
+        return None
+    metadata = json.loads(manifest.read_text(encoding="utf-8"))
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    if digest != metadata.get("sha256"):
+        raise ValueError("Cached survey FITS checksum mismatch; use a fresh cache directory")
+    return SurveyTemplate(path, metadata)
+
+
+def _write_template_cache(path: Path, manifest: Path, hdus: fits.HDUList, metadata: dict) -> None:
+    from .astro import atomic_json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(dir=path.parent, suffix=".fits", delete=False) as stream:
+        temporary = Path(stream.name)
+    try:
+        hdus.writeto(temporary, overwrite=True, checksum=True)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    with path.open("rb") as stream:
+        metadata["sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
+    atomic_json(manifest, metadata)
+
+
 def fetch_survey_template(
     request: TemplateRequest,
     cache_dir: str | Path,
@@ -290,8 +363,6 @@ def fetch_survey_template(
     max_download_mb: float = 64,
 ) -> SurveyTemplate:
     """Download bounded HTTPS FITS products, or verify and reuse a cached template."""
-    from .astro import atomic_json
-
     if not np.isfinite(timeout) or timeout <= 0 or not 0 < max_download_mb <= 512:
         raise ValueError("Use finite positive timeout and download limit (at most 512 MB)")
     cache = Path(cache_dir).expanduser().resolve()
@@ -300,14 +371,40 @@ def fetch_survey_template(
     identity.pop("native_science_filter")
     identity.pop("science_filter")
     key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-    path, manifest = cache / f"{key}.fits", cache / f"{key}.json"
-    if path.is_file() and manifest.is_file():
-        metadata = json.loads(manifest.read_text(encoding="utf-8"))
-        if hashlib.sha256(path.read_bytes()).hexdigest() != metadata.get("sha256"):
-            raise ValueError("Cached survey FITS checksum mismatch; use a fresh cache directory")
-        return SurveyTemplate(path, metadata)
-    selected = _discover_template(request, timeout)
+    legacy_path, legacy_manifest = cache / f"{key}.fits", cache / f"{key}.json"
+    suffix = ".native-mask-v1" if request.survey == "panstarrs" else ""
+    path, manifest = cache / f"{key}{suffix}.fits", cache / f"{key}{suffix}.json"
+    cached = _cached_template(path, manifest)
+    if cached is not None:
+        return cached
     limit = int(max_download_mb * 1_000_000)
+    if suffix:
+        legacy = _cached_template(legacy_path, legacy_manifest)
+        if legacy is not None:
+            mask_url = legacy.metadata.get("mask_url")
+            if not mask_url:
+                return legacy
+            with fits.open(legacy.fits_path, memmap=False) as hdus:
+                image = _science_hdu(hdus)
+                primary = hdus[0]
+                if not isinstance(primary, fits.PrimaryHDU):
+                    raise ValueError("Cached survey FITS is missing its primary HDU")
+                data = image.data
+                if data is None or data.ndim != 2:
+                    raise ValueError("Cached survey FITS has no two-dimensional science plane")
+                header = primary.header.copy()
+                header.update(image.header)
+                mask, raw_url = _panstarrs_native_mask(mask_url, header, data.shape, timeout, limit)
+                if "MASK" not in hdus:
+                    raise ValueError("Cached Pan-STARRS template is missing its mask plane")
+                mask_hdu = hdus["MASK"]
+                if not isinstance(mask_hdu, (fits.ImageHDU, fits.CompImageHDU)):
+                    raise ValueError("Cached Pan-STARRS mask is not an image plane")
+                mask_hdu.data = mask
+                metadata = {**legacy.metadata, "native_mask_url": raw_url}
+                _write_template_cache(path, manifest, hdus, metadata)
+            return SurveyTemplate(path, metadata)
+    selected = _discover_template(request, timeout)
     data, header = _fits_image(_download_url(selected["image_url"], timeout, limit))
     wcs = WCS(header)
     if not wcs.has_celestial or not np.isfinite(data).any():
@@ -322,17 +419,25 @@ def fetch_survey_template(
     hdus = [fits.PrimaryHDU(data, header)]
     for kind, extension in (("variance_url", "VAR"), ("mask_url", "MASK")):
         if selected.get(kind):
-            auxiliary, auxiliary_header = _fits_image(_download_url(selected[kind], timeout, limit))
-            if auxiliary.shape != data.shape:
-                raise ValueError("Survey mask/variance shape does not match its image")
-            reference_pixels = np.array([[0, 0], [data.shape[1] - 1, data.shape[0] - 1]])
-            if not np.allclose(
-                WCS(auxiliary_header).celestial.all_pix2world(reference_pixels, 0),
-                wcs.celestial.all_pix2world(reference_pixels, 0),
-                atol=1e-7,
-                rtol=0,
-            ):
-                raise ValueError("Survey mask/variance WCS does not match its image")
+            if kind == "mask_url" and request.survey == "panstarrs":
+                auxiliary, raw_url = _panstarrs_native_mask(
+                    selected[kind], header, data.shape, timeout, limit
+                )
+                selected["native_mask_url"] = raw_url
+            else:
+                auxiliary, auxiliary_header = _fits_image(
+                    _download_url(selected[kind], timeout, limit)
+                )
+                if auxiliary.shape != data.shape:
+                    raise ValueError("Survey mask/variance shape does not match its image")
+                reference_pixels = np.array([[0, 0], [data.shape[1] - 1, data.shape[0] - 1]])
+                if not np.allclose(
+                    WCS(auxiliary_header).celestial.all_pix2world(reference_pixels, 0),
+                    wcs.celestial.all_pix2world(reference_pixels, 0),
+                    atol=1e-7,
+                    rtol=0,
+                ):
+                    raise ValueError("Survey mask/variance WCS does not match its image")
             hdus.append(fits.ImageHDU(auxiliary, name=extension))
     mjd = header.get("MJD-OBS", selected.get("mjd"))
     if request.science_mjd is not None and mjd is not None and float(mjd) >= request.science_mjd:
@@ -353,16 +458,7 @@ def fetch_survey_template(
         if selected.get("variance_url")
         else "none",
     }
-    cache.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(dir=cache, suffix=".fits", delete=False) as stream:
-        temporary = Path(stream.name)
-    try:
-        fits.HDUList(hdus).writeto(temporary, overwrite=True, checksum=True)
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
-    metadata["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
-    atomic_json(manifest, metadata)
+    _write_template_cache(path, manifest, fits.HDUList(hdus), metadata)
     return SurveyTemplate(path, metadata)
 
 

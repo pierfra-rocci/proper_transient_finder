@@ -36,3 +36,7 @@ survey_cache/
 freebuff*
 prepared_reference_retry/survey_mosaic.json
 prepared_reference_retry_2/survey_mosaic.json
+prepared_reference_retry_3/survey_mosaic.json
+results/mosaic_001/pipeline.log
+results/mosaic_001/run_status.json
+prepared_reference_retry_4/survey_mosaic.json

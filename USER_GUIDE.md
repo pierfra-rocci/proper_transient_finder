@@ -467,12 +467,19 @@ responsible for its existing reference-to-science reprojection and subtraction.
 ```
 
 The safe request widths are 24.9 arcminutes for Pan-STARRS and 9.8 arcminutes
-for SkyMapper, just below the provider ceilings. Tiles overlap by 10% and the
-preparer refuses completion if their combined valid coverage misses any science
-footprint pixel. `survey_mosaic.json` records the plan, tile metadata, output
-shape and warnings. The preparation directory must be new or empty and must be
-separate from the survey cache; it must not be the science input directory or
-an ancestor of it.
+for SkyMapper, just below the provider ceilings. Tiles overlap by 10% and, by
+default, the preparer refuses completion if their combined valid coverage misses
+any science footprint pixel. `survey_mosaic.json` records the plan, tile metadata, output
+shape and warnings. The preparation directory must be new or empty unless
+`--overwrite` is explicitly supplied. It must be separate from the survey cache
+and must not be the science input directory or an ancestor of it.
+
+With `--overwrite`, preparation is staged before the three preparer products
+are replaced. A download or preparation failure leaves the prior products
+untouched. Other files in the directory are preserved, and product paths that
+are directories or symbolic links are rejected. If replacement itself is
+interrupted, `survey_mosaic.json` records an `in_progress` or `failed` state;
+do not use that output as a completed preparation.
 
 When a padded field is only a little too large, the default is simpler: if it
 is within 5% of one safe tile, the preparer writes a **separate centred crop**
@@ -481,6 +488,31 @@ only the outer science region from that subsequent comparison; it never alters
 the original. Pass `--single-tile-overrun 0` to mosaic every oversized field,
 or select a value up to `0.25` for a deliberately larger crop tolerance.
 `--check-only` reports the local plan without downloading or writing files.
+
+For an explicit crop **before** survey downloads, add `--crop-border-percent`
+to remove 5% from each edge, or specify another percentage, for example
+`--crop-border-percent 10`. The permitted range is 0 to 25 per edge. A 5% crop
+on all four sides retains approximately 81% of the image area, not 95%. This
+writes a separate science image and never modifies the original; no additional
+automatic single-tile crop is applied when this option is used. Inspect the
+reported `border_crop_bounds` with `--check-only` first. The crop can change
+tile positions and may require new downloads.
+
+Alternatively, for a tiled mosaic, `--max-missing-fraction 0.1` permits up to
+10% of science-grid pixels to lack valid reference coverage; the default is
+zero and the maximum is 0.1. Coverage is evaluated conservatively on the science
+grid using bilinear interpolation. Uncovered pixels remain masked in the
+reference, not filled with fabricated data. The report records the pixel count,
+fraction and a warning; sources in uncovered regions cannot be detected. The
+option does not relax validation of variance for otherwise valid mosaic pixels
+and does not change single-cutout validation. These two options can be combined,
+but cropping does not guarantee that interior gaps disappear.
+
+Pan-STARRS mask cutouts can represent zero-valued mask pixels as NaN. The
+preparer retrieves the native integer bitmask instead, aligns it to each cutout,
+and masks pixels outside the native image. Existing checksum-verified cached
+templates with older mask cutouts are upgraded to separate cache files using
+their original image and variance planes; the originals are not overwritten.
 
 The preparer preserves native reference headers and does not invent a zero
 point, gain, variance, unit conversion, filter transformation, or epoch
@@ -1217,7 +1249,7 @@ To see individual test names or investigate one behavior:
 & $Python -m pytest -c $Configuration $AstroTests -q -k properimage
 ```
 
-The current suite expands to 185 test cases, including parameterized invalid
+The current suite expands to 206 test cases, including parameterized invalid
 configuration and preflight checks. It covers:
 
 - Score calibration, preservation of bright sources, and invalid-pixel masks.

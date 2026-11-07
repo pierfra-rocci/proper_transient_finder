@@ -618,7 +618,7 @@ def test_survey_https_rejects_non_service_urls(persist):
 
 def test_survey_download_validates_caches_and_preserves_native_metadata(tmp_path, monkeypatch):
     from io import BytesIO
-    from urllib.parse import parse_qs, urlsplit
+    from urllib.parse import urlsplit
 
     from astropy.wcs import WCS
 
@@ -644,7 +644,8 @@ def test_survey_download_validates_caches_and_preserves_native_metadata(tmp_path
                 b"r stack.wt /test.wt.fits 0\nr stack.mask /test.mask.fits 0\n"
             )
         image = np.ones((64, 64))
-        if ".mask.fits" in parse_qs(urlsplit(url).query)["red"][0]:
+        if urlsplit(url).path.endswith(".mask.fits"):
+            image = np.zeros((64, 64), dtype=np.uint16)
             image[0, 0] = 8
         stream = BytesIO()
         fits.writeto(stream, image, header)
