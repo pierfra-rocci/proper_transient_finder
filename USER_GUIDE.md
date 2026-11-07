@@ -526,7 +526,10 @@ tile positions and may require new downloads.
 
 Alternatively, for a tiled mosaic, `--max-missing-fraction 0.1` permits up to
 10% of science-grid pixels to lack valid reference coverage; the default is
-zero and the maximum is 0.1. Coverage is evaluated conservatively on the science
+zero and the maximum is 0.5 (50%). For example, `--max-missing-fraction 0.5`
+explicitly accepts up to half the science pixels without coverage; this can
+substantially limit detection, and later processing may mask still more area.
+Coverage is evaluated conservatively on the science
 grid using bilinear interpolation. Uncovered pixels remain masked in the
 reference, not filled with fabricated data. The report records the pixel count,
 fraction and a warning in the acquisition record; sources in uncovered regions
@@ -1286,7 +1289,7 @@ To see individual test names or investigate one behavior:
 & $Python -m pytest -c $Configuration $AstroTests -q -k properimage
 ```
 
-The current suite expands to 206 test cases, including parameterized invalid
+The current suite expands to 210 test cases, including parameterized invalid
 configuration and preflight checks. It covers:
 
 - Score calibration, preservation of bright sources, and invalid-pixel masks.

@@ -330,8 +330,8 @@ def _write_mosaic(
     *,
     max_missing_fraction: float = 0.0,
 ) -> dict:
-    if not np.isfinite(max_missing_fraction) or not 0 <= max_missing_fraction <= 0.1:
-        raise ValueError("max_missing_fraction must be between zero and 0.1")
+    if not np.isfinite(max_missing_fraction) or not 0 <= max_missing_fraction <= 0.5:
+        raise ValueError("max_missing_fraction must be between zero and 0.5")
     _, first_header, _, _ = _tile_image(templates[0])
     source_wcs = WCS(first_header).celestial
     scales = proj_plane_pixel_scales(source_wcs)
@@ -464,8 +464,8 @@ def prepare_survey_mosaic(
     ``science_for_reference.fits``, ``survey_reference.fits``, and an auditable
     ``survey_mosaic.json`` plan.  ``check_only`` only derives the local plan.
     """
-    if not np.isfinite(max_missing_fraction) or not 0 <= max_missing_fraction <= 0.1:
-        raise ValueError("max_missing_fraction must be between zero and 0.1")
+    if not np.isfinite(max_missing_fraction) or not 0 <= max_missing_fraction <= 0.5:
+        raise ValueError("max_missing_fraction must be between zero and 0.5")
     plan = plan_survey_mosaic(
         science_fits,
         template_filter,
@@ -668,7 +668,7 @@ def main(argv: list[str] | None = None) -> int:
         "--max-missing-fraction",
         type=float,
         default=0.0,
-        help="Maximum uncovered science-pixel fraction in a mosaic (0 to 0.1; default: 0)",
+        help="Maximum uncovered science-pixel fraction in a mosaic (0 to 0.5; default: 0)",
     )
     parser.add_argument(
         "--single-tile-overrun",

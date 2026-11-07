@@ -119,7 +119,10 @@ def test_preparer_crops_small_overrun_without_editing_input(
     assert Path(report["reference_fits"]).is_file()
 
 
-def test_preparer_tiles_and_mosaics_large_field(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("max_missing_fraction", [0.0, 0.5])
+def test_preparer_tiles_and_mosaics_large_field(
+    tmp_path, monkeypatch, max_missing_fraction
+) -> None:
     from proper_transient_finder import survey_mosaic
 
     science = tmp_path / "science.fits"
@@ -132,9 +135,11 @@ def test_preparer_tiles_and_mosaics_large_field(tmp_path, monkeypatch) -> None:
         template_filter="r",
         survey="panstarrs",
         cache_dir=tmp_path / "cache",
+        max_missing_fraction=max_missing_fraction,
     )
 
     assert report["plan"]["mode"] == "mosaic"
+    assert report["max_missing_fraction"] == max_missing_fraction
     assert report["acquisition"]["tiles"] == 4
     with fits.open(report["reference_fits"], memmap=False) as hdus:
         assert hdus[0].header["MOSAIC"]
@@ -358,7 +363,7 @@ def test_cli_preflight_reports_opt_in_crop_and_missing_limit(tmp_path, capsys) -
                 "r",
                 "--crop-border-percent",
                 "--max-missing-fraction",
-                "0.1",
+                "0.5",
                 "--check-only",
             ]
         )
@@ -366,7 +371,7 @@ def test_cli_preflight_reports_opt_in_crop_and_missing_limit(tmp_path, capsys) -
     )
     report = json.loads(capsys.readouterr().out)
     assert report["plan"]["border_crop_bounds"] == [5, 95, 5, 95]
-    assert report["max_missing_fraction"] == 0.1
+    assert report["max_missing_fraction"] == 0.5
     assert any("single-cutout coverage" in warning for warning in report["warnings"])
     assert not (tmp_path / "output").exists()
 
@@ -420,8 +425,8 @@ def test_partial_mosaic_coverage_enforces_exact_fraction_and_masks_gaps(tmp_path
     assert not (tmp_path / "rejected.fits").exists()
 
 
-@pytest.mark.parametrize("missing", [10, 11])
-def test_partial_mosaic_enforces_ten_percent_boundary(tmp_path, monkeypatch, missing) -> None:
+@pytest.mark.parametrize(("limit", "missing"), [(0.1, 10), (0.1, 11), (0.5, 50), (0.5, 51)])
+def test_partial_mosaic_enforces_coverage_boundary(tmp_path, monkeypatch, limit, missing) -> None:
     from proper_transient_finder import survey_mosaic
 
     science = tmp_path / "science.fits"
@@ -442,24 +447,25 @@ def test_partial_mosaic_enforces_ten_percent_boundary(tmp_path, monkeypatch, mis
 
     monkeypatch.setattr(survey_mosaic, "reproject_interp", project)
     destination = tmp_path / "result.fits"
-    if missing == 10:
+    if missing / 100 <= limit:
         report = survey_mosaic._write_mosaic(
-            [tile], header, (10, 10), destination, max_missing_fraction=0.1
+            [tile], header, (10, 10), destination, max_missing_fraction=limit
         )
-        assert report["missing_science_fraction"] == 0.1
+        assert report["missing_science_fraction"] == missing / 100
         with fits.open(destination) as hdus:
-            assert np.count_nonzero(hdus["MASK"].data) == 10
+            assert np.count_nonzero(hdus["MASK"].data) == missing
+            assert np.all(np.isnan(hdus[0].data[hdus["MASK"].data != 0]))
     else:
-        with pytest.raises(ValueError, match="11.00%"):
+        with pytest.raises(ValueError, match=f"{missing:.2f}%"):
             survey_mosaic._write_mosaic(
-                [tile], header, (10, 10), destination, max_missing_fraction=0.1
+                [tile], header, (10, 10), destination, max_missing_fraction=limit
             )
         assert not destination.exists()
 
 
-@pytest.mark.parametrize("fraction", [-0.01, 0.101, float("nan")])
+@pytest.mark.parametrize("fraction", [-0.01, 0.500001, float("nan"), float("inf")])
 def test_missing_coverage_rejects_invalid_fraction_before_writes(tmp_path, fraction) -> None:
-    from proper_transient_finder.survey_mosaic import prepare_survey_mosaic
+    from proper_transient_finder.survey_mosaic import _write_mosaic, prepare_survey_mosaic
 
     science = tmp_path / "science.fits"
     _science(science, 100, 1)
@@ -468,6 +474,12 @@ def test_missing_coverage_rejects_invalid_fraction_before_writes(tmp_path, fract
             science, tmp_path / "output", template_filter="r", max_missing_fraction=fraction
         )
     assert not (tmp_path / "output").exists()
+    destination = tmp_path / "mosaic.fits"
+    with pytest.raises(ValueError, match="max_missing_fraction"):
+        _write_mosaic(
+            [], fits.getheader(science), (100, 100), destination, max_missing_fraction=fraction
+        )
+    assert not destination.exists()
 
 
 @pytest.mark.parametrize("science_has_wcs", [False, True])

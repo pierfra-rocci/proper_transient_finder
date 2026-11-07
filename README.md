@@ -205,7 +205,8 @@ proper-transient-finder --ref prepared_reference\survey_reference.fits --new pre
 The preparer uses 24.9-arcminute Pan-STARRS or 9.8-arcminute SkyMapper tiles,
 with overlap. Full valid coverage is required by default. For tiled mosaics,
 `--max-missing-fraction 0.1` explicitly permits up to 10% missing science-grid
-coverage; those pixels remain masked and sources there cannot be detected.
+coverage. The maximum setting is `0.5` (50%); missing pixels remain masked and
+sources there cannot be detected, while downstream masks may exclude more area.
 `--crop-border-percent` instead removes 5% from each edge before downloading;
 that retains about 81% of the image area. Both options are opt-in and may be
 combined. If a padded footprint is at most 5% over one safe tile, the default
