@@ -554,8 +554,19 @@ class PipelineConfig:
     color_reference_snr: float = 5.0
     color_quantile: float = 0.95
     color_error_margin: float = 3.0
+    science_filter: str | None = None
 
     def __post_init__(self) -> None:
+        if self.science_filter is not None:
+            if (
+                not isinstance(self.science_filter, str)
+                or not self.science_filter.strip()
+                or self.science_filter.strip().lower() == "unknown"
+                or not self.science_filter.isascii()
+                or not self.science_filter.isprintable()
+            ):
+                raise ValueError("science_filter must be a nonempty printable ASCII filter label")
+            self.science_filter = self.science_filter.strip()
         if not self.fitted_psf:
             raise ValueError(
                 "Empirical PSF mode is disabled; use Gaussian PSFs or provide "
@@ -721,6 +732,19 @@ class ProperTransientFinder:
                 )
             )
         self.reference, self.new = frames
+        if options.science_filter is not None:
+            original_filter = self.new.header.get("FILTER")
+            self.metadata["science_filter_override"] = {
+                "original": str(original_filter) if original_filter is not None else None,
+                "declared": options.science_filter,
+            }
+            self.new.header["FILTER"] = options.science_filter
+            LOGGER.warning(
+                "Using user-declared science FILTER %r instead of header value %r; "
+                "verify the actual bandpass",
+                options.science_filter,
+                original_filter,
+            )
         self.new_header = self.new.header.copy()
         self.metadata["input_observation_dates"] = {
             label: {
@@ -784,7 +808,7 @@ class ProperTransientFinder:
         for supplied in (self.options.ref_psf, self.options.new_psf):
             if supplied:
                 normalize_psf(fits.getdata(supplied, memmap=False), self.options.psf_radius)
-        return {
+        report = {
             "status": "input_checks_passed",
             "output_written": False,
             "inputs": {
@@ -809,6 +833,9 @@ class ProperTransientFinder:
                 "Transient detectability",
             ],
         }
+        if "science_filter_override" in self.metadata:
+            report["science_filter_override"] = self.metadata["science_filter_override"]
+        return report
 
     def _write_run_status(self, state: str, stage: str, error: str | None = None) -> None:
         if self._status_path is not None:
@@ -1985,7 +2012,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--template-filter", help="Explicit survey template band")
     parser.add_argument("--science-list", help="Text paths or JSON array of science paths")
-    parser.add_argument("--science-filter", help="Explicit science band if FILTER is absent")
+    parser.add_argument(
+        "--science-filter", help="Override the science FITS FILTER with a verified band label"
+    )
     parser.add_argument("--template-cache", default="survey_cache")
     parser.add_argument(
         "--template-units",
@@ -2118,7 +2147,6 @@ def main(argv: list[str] | None = None) -> int:
         survey_options[name] is not None
         for name in (
             "template_filter",
-            "science_filter",
             "template_units",
             "template_gain",
         )
@@ -2132,6 +2160,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--ref and --new are required unless --batch is provided")
         if fail_fast:
             parser.error("--fail-fast requires --batch")
+    if not survey:
+        args["science_filter"] = survey_options.pop("science_filter")
     logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
     ref, new, output = (args.pop(name) for name in ("ref", "new", "output"))
     threshold = args.pop("threshold")

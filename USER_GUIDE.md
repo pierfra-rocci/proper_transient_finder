@@ -322,7 +322,7 @@ the solution independently.
 
 | Input metadata or extension | Meaning |
 | --- | --- |
-| `FILTER` | When present in both images, the values must agree. |
+| `FILTER` | When present in both images, the values must agree unless experimental cross-filter mode is selected. `--science-filter` can override the science label. |
 | `BUNIT` | When present in both images, the labels must agree; unit conversions are not performed. |
 | `GAIN` | Electrons per image count; `--gain` overrides both input headers. |
 | `SATURATE` | Saturation level in input image counts; `--saturation` overrides both headers. |
@@ -355,6 +355,24 @@ Supply real instrument saturation levels. Without SATURATE or `--saturation`,
 the pipeline cannot identify saturated pixels by level and emits a warning.
 Gain and saturation overrides apply to both images; retain correct per-image
 headers if the two detectors/exposures need different values.
+
+If the science `FILTER` header is missing or incorrectly named, provide its
+verified actual filter with `--science-filter`, for example `--science-filter r`.
+For an ordinary local comparison, use the exact reference header label when
+both images truly represent the same band; local comparisons do not normalize
+aliases automatically. The override applies only to the science image in memory:
+original FITS files are unchanged, preflight and provenance record the original
+and declared labels, and output FITS use the declared label. For Python, set
+`PipelineConfig(science_filter="r")`. In local batches the CLI option applies
+to every job unless overridden by that job's configuration. In the survey
+Python API, the explicit `science_filter` argument takes precedence over the
+same setting in `PipelineConfig`.
+
+An override is a metadata declaration, not a filter transformation or proof of
+equivalent bandpasses. If the true science and reference filters differ, use
+the explicit experimental `--cross-filter` mode and retain its cautions; unit
+checks remain unchanged. Do not select an inaccurate label merely to bypass
+the mismatch.
 
 ## 4. Run The Pipeline
 
@@ -556,9 +574,10 @@ values and use the cross-filter precautions described here. Resampling and
 overlap make the noise correlated, so all candidates remain unconfirmed.
 The preparer's `--science-filter` selects and records a planning label; it does
 not insert a missing `FILTER` into `science_for_reference.fits`. The subsequent
-local `--ref/--new` comparison requires valid filter headers in both inputs when
-`--cross-filter` is selected. Provide verified metadata in separate copies as
-needed. For absent or ambiguous reference BUNIT, choose `--reproject-units`
+local `--ref/--new` comparison can use `--science-filter` again to declare the
+verified science label without modifying the prepared file. Cross-filter mode
+still requires a reference filter label and a science label from the header or
+the override. For absent or ambiguous reference BUNIT, choose `--reproject-units`
 only after verifying the physical interpretation; this does not convert pixels.
 
 **Verify native units before declaring `adu`.** Pan-STARRS cutouts can lack BUNIT;
@@ -1150,7 +1169,7 @@ Run `--help` for the installed interface. Defaults below describe this version.
 | `--survey` | None (offline/local) | Opt in to `auto`, `panstarrs` or `skymapper` reference acquisition. |
 | `--template-filter` | Required with `--survey` | Explicit supported survey template band; never silently substituted. |
 | `--science-list` | None | Survey-only text paths or JSON string array; incompatible with `--new`. |
-| `--science-filter` | FITS FILTER | Explicit science label for survey mode when missing/ambiguous. |
+| `--science-filter` | FITS FILTER | Verified science label override for local, batch, or survey comparisons; original FITS is unchanged. |
 | `--template-cache` | `survey_cache` | Survey FITS/manifests and normalized copies, separate from results. |
 | `--template-units` | Native BUNIT | Verified native `adu` or `electron` declaration for ambiguous template headers; no conversion. |
 | `--template-gain` | Native GAIN | Template electrons per count, independently of science gain. |
@@ -1289,7 +1308,7 @@ To see individual test names or investigate one behavior:
 & $Python -m pytest -c $Configuration $AstroTests -q -k properimage
 ```
 
-The current suite expands to 210 test cases, including parameterized invalid
+The current suite expands to 220 test cases, including parameterized invalid
 configuration and preflight checks. It covers:
 
 - Score calibration, preservation of bright sources, and invalid-pixel masks.

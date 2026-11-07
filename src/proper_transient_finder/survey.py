@@ -552,11 +552,14 @@ def compare_survey_images(
     from .api import _config_values, compare_images
     from .astro import atomic_json
 
-    request = prepare_template_request(
-        science_fits, template_filter, survey=survey, science_filter=science_filter
-    )
     options = _survey_options(
         config, template_units, template_gain, timeout, max_download_mb, threshold_sigma
+    )
+    request = prepare_template_request(
+        science_fits,
+        template_filter,
+        survey=survey,
+        science_filter=science_filter if science_filter is not None else options.science_filter,
     )
     root = Path(output_dir).expanduser().resolve()
     cache = Path(cache_dir).expanduser().resolve()
@@ -613,6 +616,7 @@ def compare_survey_images(
             reproject_units="flux-per-pixel",
             cross_filter=cross_filter,
             gain=None,
+            science_filter=None,
         )
         cache.mkdir(parents=True, exist_ok=True)
         values["science_sha256"] = hashlib.sha256(request.science_fits.read_bytes()).hexdigest()

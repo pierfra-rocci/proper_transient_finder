@@ -223,6 +223,7 @@ Explicit assumptions and conservative candidate-selection defaults.
 | `color_reference_snr` | `float` | `5.0` |
 | `color_quantile` | `float` | `0.95` |
 | `color_error_margin` | `float` | `3.0` |
+| `science_filter` | `str \| None` | `None` |
 
 ## PipelineResult
 

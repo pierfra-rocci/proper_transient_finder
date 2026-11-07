@@ -436,6 +436,35 @@ def test_survey_check_only_uses_no_network_or_writes(tmp_path, monkeypatch):
     assert set(tmp_path.iterdir()) == {image}
 
 
+def test_survey_science_filter_config_and_explicit_override(tmp_path):
+    from proper_transient_finder import survey
+
+    wcs = astro.WCS(naxis=2)
+    wcs.wcs.crpix = [32.5, 32.5]
+    wcs.wcs.crval = [180, 20]
+    wcs.wcs.cdelt = [-0.25 / 3600, 0.25 / 3600]
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    header = wcs.to_header()
+    header["FILTER"] = "wrong"
+    image = tmp_path / "science.fits"
+    fits.writeto(image, np.ones((64, 64)), header)
+    options = {
+        "template_filter": "r",
+        "cache_dir": tmp_path / "cache",
+        "config": PipelineConfig(science_filter="g"),
+        "check_only": True,
+    }
+
+    report = survey.compare_survey_images(image, tmp_path / "first", **options)
+    assert report["request"]["science_filter"] == "g"
+    assert report["request"]["native_science_filter"] == "wrong"
+    assert report["request"]["comparison_mode"] == "experimental cross-filter"
+    report = survey.compare_survey_images(image, tmp_path / "second", science_filter="r", **options)
+    assert report["request"]["science_filter"] == "r"
+    assert report["request"]["comparison_mode"] == "same-band"
+    assert fits.getheader(image)["FILTER"] == "wrong"
+
+
 @pytest.mark.parametrize("template_band", ["r", "g"])
 def test_survey_real_subtraction_and_final_plot(tmp_path, monkeypatch, template_band):
     from proper_transient_finder import survey
@@ -466,9 +495,12 @@ def test_survey_real_subtraction_and_final_plot(tmp_path, monkeypatch, template_
         tmp_path / "results",
         template_filter=template_band,
         cache_dir=tmp_path / "cache",
-        config={"cosmic_rays": False, "plots": True},
+        science_filter="r",
+        config={"cosmic_rays": False, "plots": True, "science_filter": "g"},
     )
     assert not result.candidates.empty
+    assert result.metadata["survey_reference"]["science_filter"] == "r"
+    assert result.metadata["config"]["science_filter"] is None
     assert (tmp_path / "results/survey_diagnostic.png").stat().st_size > 10_000
     assert (
         json.loads((tmp_path / "results/survey_reference.json").read_text())["state"] == "completed"
@@ -745,10 +777,15 @@ def test_survey_wrapper_reuses_comparison_without_editing_science(tmp_path, monk
 
     monkeypatch.setattr(api, "compare_images", compare)
     result = survey.compare_survey_images(
-        science, tmp_path / "result", template_filter=band, cache_dir=cache, config={"plots": False}
+        science,
+        tmp_path / "result",
+        template_filter=band,
+        cache_dir=cache,
+        config={"plots": False, "science_filter": "g"},
     )
     assert seen["config"].reproject
     assert seen["config"].cross_filter == (band == "g")
+    assert seen["config"].science_filter is None
     assert science.read_bytes() == original_science
     assert paths[1].read_bytes() == original
     assert result.metadata["survey_reference"]["warnings"]
@@ -1311,6 +1348,94 @@ def test_cross_filter_cli_is_explicit_and_preserves_input_headers(tmp_path, caps
     assert fits.getheader(paths[1])["FILTER"] == "RP-like"
 
 
+def test_science_filter_cli_override_is_recorded_and_preserves_input(tmp_path, capsys) -> None:
+    paths = synthetic_pair(tmp_path)
+    data, header = fits.getdata(paths[1], header=True, memmap=False)
+    header["FILTER"] = "incorrect"
+    fits.writeto(paths[1], data, header, overwrite=True)
+    original = paths[1].read_bytes()
+    output = tmp_path / "results"
+    arguments = [
+        "--ref",
+        str(paths[0]),
+        "--new",
+        str(paths[1]),
+        "--output",
+        str(output),
+        "--science-filter",
+        "r",
+        "--no-cosmic-rays",
+        "--no-plots",
+    ]
+
+    assert astro.main([*arguments, "--check-only"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["inputs"]["science"]["filter"] == "r"
+    assert report["science_filter_override"] == {"original": "incorrect", "declared": "r"}
+    assert not output.exists()
+    assert astro.main(arguments) == 0
+    provenance = json.loads((output / "provenance.json").read_text())
+    assert provenance["science_filter_override"] == {"original": "incorrect", "declared": "r"}
+    assert provenance["config"]["science_filter"] == "r"
+    assert fits.getheader(output / "difference_image.fits")["FILTER"] == "r"
+    assert paths[1].read_bytes() == original
+
+
+@pytest.mark.parametrize("header_filter", ["incorrect", None])
+def test_science_filter_override_preserves_cross_filter_and_unit_checks(tmp_path, header_filter):
+    paths = synthetic_pair(tmp_path)
+    data, header = fits.getdata(paths[1], header=True, memmap=False)
+    if header_filter is None:
+        del header["FILTER"]
+    else:
+        header["FILTER"] = header_filter
+    fits.writeto(paths[1], data, header, overwrite=True)
+    options = {"science_filter": "g", "cosmic_rays": False}
+    with pytest.raises(ValueError, match="FILTER values differ"):
+        ProperTransientFinder(*paths, tmp_path / "same-band", options).preflight()
+    pipeline = ProperTransientFinder(
+        *paths, tmp_path / "cross-band", {**options, "cross_filter": True}
+    )
+    report = pipeline.preflight()
+    assert report["science_filter_override"] == {"original": header_filter, "declared": "g"}
+    assert pipeline.metadata["reference_filter"] == "r"
+    assert pipeline.metadata["science_filter"] == "g"
+    header["BUNIT"] = "electron"
+    fits.writeto(paths[1], data, header, overwrite=True)
+    with pytest.raises(ValueError, match="BUNIT values differ"):
+        ProperTransientFinder(
+            *paths, tmp_path / "bad-units", {**options, "cross_filter": True}
+        ).preflight()
+
+
+def test_batch_cli_applies_shared_science_filter_override(tmp_path, capsys):
+    paths = synthetic_pair(tmp_path)
+    data, header = fits.getdata(paths[1], header=True, memmap=False)
+    header["FILTER"] = "incorrect"
+    fits.writeto(paths[1], data, header, overwrite=True)
+    manifest = tmp_path / "batch.json"
+    manifest.write_text(json.dumps([{"ref": paths[0].name, "new": paths[1].name}]))
+    assert (
+        astro.main(
+            [
+                "--batch",
+                str(manifest),
+                "--output",
+                str(tmp_path / "batch"),
+                "--science-filter",
+                "r",
+                "--check-only",
+            ]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["jobs"][0]["preflight"]["science_filter_override"] == {
+        "original": "incorrect",
+        "declared": "r",
+    }
+
+
 @pytest.mark.parametrize(
     "config",
     [
@@ -1321,6 +1446,11 @@ def test_cross_filter_cli_is_explicit_and_preserves_input_headers(tmp_path, caps
         {"ref_psf": "only-one.fits"},
         {"cross_filter": True, "method": "proper"},
         {"cross_filter": True, "max_scale_scatter": float("nan")},
+        {"science_filter": ""},
+        {"science_filter": "unknown"},
+        {"science_filter": 42},
+        {"science_filter": "é"},
+        {"science_filter": "r\n"},
     ],
 )
 def test_invalid_config_is_rejected(config) -> None:

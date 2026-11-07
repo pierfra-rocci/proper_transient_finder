@@ -225,8 +225,11 @@ cutouts are upgraded in separate cache files.
 Use the prepared science copy in the local pipeline, especially if it was
 cropped. Verify both inputs' filter labels, units and noise calibration first:
 `--science-filter` informs the survey plan but does not insert a `FILTER` header
-into the prepared science FITS. Different bands require explicit experimental
-cross-filter handling; missing or ambiguous BUNIT requires a verified
+into the prepared science FITS. If its header label is missing or incorrect,
+pass `--science-filter r` to the local comparison too, using the verified actual
+science band and the exact reference label for a same-band comparison. This
+overrides the science label without modifying the input. Different bands require
+explicit experimental cross-filter handling; missing or ambiguous BUNIT requires a verified
 `--reproject-units` choice. No option converts the pixels or makes different
 bandpasses equivalent. See [the full preparer guide](USER_GUIDE.md#standalone-large-footprint-mosaic-preparer).
 
