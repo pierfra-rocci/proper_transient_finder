@@ -308,6 +308,17 @@ text-mode download or character-encoding conversion. Rice decompression errors,
 invalid HDU headers and unexpected file lengths should be investigated as input
 integrity failures, not bypassed by filling missing pixels. Re-download the
 original binary file and compare the provider's size/checksum when available.
+`Unparsable card` errors can also arise from non-standard FITS header values,
+including proprietary plate-solver metadata. Obtain a standards-compliant copy
+or repair a separate copy with a knowledgeable upstream tool; preserve the
+original and independently verify the celestial WCS. Astropy's `verify('fix')`
+can change the representation or interpretation of malformed metadata, and
+non-ASCII header characters may be replaced. The pipeline and mosaic preparer
+do not automatically repair such inputs.
+Astropy `FITSFixedWarning` messages about dates or deprecated WCS keywords can
+describe metadata adjustments rather than a fatal error, but they do not prove
+the WCS is astrometrically accurate. Review the affected metadata and validate
+the solution independently.
 
 | Input metadata or extension | Meaning |
 | --- | --- |
@@ -330,6 +341,15 @@ with a warning. Recognized non-count units, such as `adu/s`, require a variance
 plane; a raw detector gain must not be used to invent Poisson noise for
 flux-calibrated/count-rate images. ProperImage's alternative backend requires
 appropriate detector-count input and uses its own internal noise model.
+
+For averaged or normalized stacks, the effective gain in electrons per **saved
+image unit** can differ from the original detector gain. A camera-specific
+`CVF` or `GAIN_ELE` header is not automatically used as `GAIN`, and camera
+settings or the inverse of a conversion factor are not a substitute for a
+validated effective gain. Obtain the stacking/scaling details or a total
+VAR/ERR plane. In particular, do not choose a guessed gain merely to increase
+the number of detected stars; source selection and scientific uncertainties
+depend on the noise model.
 
 Supply real instrument saturation levels. Without SATURATE or `--saturation`,
 the pipeline cannot identify saturated pixels by level and emits a warning.
@@ -458,13 +478,19 @@ first. This workflow does not plate-solve or calibrate the science exposure.
 This utility is deliberately separate from the pipeline script. It derives the
 same padded science footprint locally, downloads safe overlapping tiles, and
 reprojects them to a north-up TAN mosaic at the native survey pixel scale. The
-mosaic covers the complete science footprint; the normal pipeline remains
+mosaic requires complete science-footprint coverage by default; an explicit
+option below permits bounded missing coverage. The normal pipeline remains
 responsible for its existing reference-to-science reprojection and subtraction.
 
 ```powershell
-& $Python "scripts\prepare_survey_mosaic.py" --science "C:\data\science.fits" --survey panstarrs --template-filter r --cache "C:\cache\survey" --output "C:\data\prepared_reference"
+& $Python "scripts\prepare_survey_mosaic.py" --science "C:\data\science.fits" --survey panstarrs --template-filter r --cache "C:\cache\survey" --output "C:\data\prepared_reference" --check-only
+& $Python "scripts\prepare_survey_mosaic.py" --science "C:\data\science.fits" --survey panstarrs --template-filter r --cache "C:\cache\survey" --output "C:\data\prepared_reference" --max-download-mb 512 --timeout 300
 & $Python $PipelineScript --ref "C:\data\prepared_reference\survey_reference.fits" --new "C:\data\prepared_reference\science_for_reference.fits" --reproject --output "C:\results\mosaic_001"
 ```
+
+The second command raises the per-response download limit and network timeout
+for large tiles; it does not enable incomplete coverage. It can require
+substantial transfer time, disk space and memory.
 
 The safe request widths are 24.9 arcminutes for Pan-STARRS and 9.8 arcminutes
 for SkyMapper, just below the provider ceilings. Tiles overlap by 10% and, by
@@ -503,10 +529,11 @@ Alternatively, for a tiled mosaic, `--max-missing-fraction 0.1` permits up to
 zero and the maximum is 0.1. Coverage is evaluated conservatively on the science
 grid using bilinear interpolation. Uncovered pixels remain masked in the
 reference, not filled with fabricated data. The report records the pixel count,
-fraction and a warning; sources in uncovered regions cannot be detected. The
-option does not relax validation of variance for otherwise valid mosaic pixels
-and does not change single-cutout validation. These two options can be combined,
-but cropping does not guarantee that interior gaps disappear.
+fraction and a warning in the acquisition record; sources in uncovered regions
+cannot be detected. `--check-only` cannot predict the actual missing fraction.
+The option does not relax validation of variance for otherwise valid mosaic
+pixels and does not change single-cutout validation. These two options can be
+combined, but cropping does not guarantee that interior gaps disappear.
 
 Pan-STARRS mask cutouts can represent zero-valued mask pixels as NaN. The
 preparer retrieves the native integer bitmask instead, aligns it to each cutout,
@@ -524,6 +551,12 @@ validated gain/noise model for a full subtraction.
 Before running the local pipeline, verify compatible count-space BUNIT/FILTER
 values and use the cross-filter precautions described here. Resampling and
 overlap make the noise correlated, so all candidates remain unconfirmed.
+The preparer's `--science-filter` selects and records a planning label; it does
+not insert a missing `FILTER` into `science_for_reference.fits`. The subsequent
+local `--ref/--new` comparison requires valid filter headers in both inputs when
+`--cross-filter` is selected. Provide verified metadata in separate copies as
+needed. For absent or ambiguous reference BUNIT, choose `--reproject-units`
+only after verifying the physical interpretation; this does not convert pixels.
 
 **Verify native units before declaring `adu`.** Pan-STARRS cutouts can lack BUNIT;
 SkyMapper can label it `Data Value`. These ambiguous labels fail unless you provide
@@ -606,9 +639,10 @@ options include `config`, `science_filter`, `template_units`, `template_gain`,
 Only coordinates, footprint size, template band and optional science epoch are sent
 over HTTPS to `ps1images.stsci.edu` or `api.skymapper.nci.org.au`. Science pixels and
 local paths are not uploaded. Requests and redirects are restricted to these hosts;
-TLS verification stays enabled. Default per-response timeout is 30 seconds; FITS
-products are limited to 64 MB each, configurable up to 512 MB. Discovery responses
-have a separate 4 MB limit. These are transfer limits, not full-run memory bounds.
+TLS verification stays enabled. The default network socket timeout is 30 seconds;
+FITS responses are limited to 64 MB each, configurable up to 512 MB. Discovery
+responses have a separate 4 MB limit. The timeout is not a total-run deadline,
+and response-size limits are not full-run memory bounds.
 
 If a survey request fails with `CERTIFICATE_VERIFY_FAILED`, Python could not
 verify the server's certificate chain. Check the server and your system or
@@ -626,14 +660,17 @@ a trusted CA bundle supplied by your administrator. `SSL_CERT_FILE` selects that
 bundle instead of the default CA file; networks using private CAs may require a
 bundle that also includes those CAs. Never disable TLS verification. The mosaic
 preparer may leave a failed report and science copy in its output directory;
-retry with a new, empty `--output` directory and the same cache.
+retry with a new, empty `--output` directory and the same cache, or explicitly
+use the preparer's `--overwrite` as described above.
 
 The cache defaults to `survey_cache/`, relative to the working directory. Hashed FITS
 files have JSON manifests, source URLs, image IDs, native labels/units/epochs and
 SHA-256 fingerprints. A cache hit verifies the FITS hash; corruption fails rather
 than silently reusing data. Label/gain normalization writes separate cached copies
-and never alters science inputs. Keep cache separate from results; each results root
-must be new or empty even with `--overwrite`. Preserve manifests alongside FITS for
+and never alters science inputs. Keep cache separate from results; each survey
+comparison results root must be new or empty even with `--overwrite`. The
+standalone mosaic preparer has its separate overwrite behavior described above.
+Preserve manifests alongside FITS for
 auditing. Concurrent access to the same cache is not supported. Cached products are
 not automatically refreshed; use a new cache directory to reacquire.
 
@@ -1654,7 +1691,9 @@ false-positive rate, or calibrated scientific uncertainties for your instrument.
 | tinynpydb build downloads old setuptools and gets HTTP 403 | Apply the compatible-setuptools/no-build-isolation steps in section 2. |
 | Astronomy package or dependency is missing | Run `scripts/bootstrap.ps1` (Windows) or `bash scripts/tasks.sh bootstrap` (POSIX) from the project root, then use that environment's interpreter: `.venv\Scripts\python.exe` or `.venv/bin/python`. |
 | `.fz` Rice decompression fails or HDU headers are malformed | Verify the original binary download and provider checksum. Renaming extensions or changing detection thresholds cannot repair altered compressed bytes. |
-| Too few isolated/matched/PSF stars | Check field overlap, masks, saturation, image quality, and sampling; do not invent a PSF from insufficient stars. |
+| `Unparsable card` or WCS errors in a non-standard plate-solver header | Obtain a standards-compliant, independently checked WCS in a separate copy. Do not blindly discard camera or plate-solution metadata, and do not assume syntax repair proves astrometric accuracy. |
+| Too few isolated/matched/PSF stars | Check field overlap, masks, saturation, image quality, sampling and the noise model. For normalized stacks, verify the effective gain or provide total variance; do not guess a gain or invent a PSF. `--threshold` controls final candidate detection, not the fixed star-selection threshold. |
+| Survey download exceeds the size limit or times out | For the mosaic preparer, adjust `--max-download-mb` (up to 512 MB per FITS response) and `--timeout` after checking available resources. Reuse the cache and a new output directory, or deliberately use the preparer's `--overwrite`. |
 | Registration RMS exceeds tolerance | Use `--align`, inspect star matches, and verify that both files cover the same field. |
 | WCS reprojection has too few matched stars or excessive RMS | Check both astrometric WCS solutions, overlap, and masks; correct the WCS upstream, not by adding `--align` to `--reproject`. |
 | Ambiguous BUNIT for reprojection | Choose the correct explicit `--reproject-units` interpretation; supply compatible units and total variance. |

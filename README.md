@@ -193,22 +193,41 @@ science FITS pixels are never uploaded. See
 
 The automatic `--survey` mode deliberately remains a one-cutout workflow. For
 a science footprint larger than a provider's request limit, prepare local inputs
-first, without changing the original science FITS or the pipeline:
+from a source checkout, without changing the original science FITS or the
+pipeline:
 
 ```powershell
-python scripts/prepare_survey_mosaic.py --science science.fits --survey panstarrs --template-filter r --cache survey_cache --output prepared_reference
-proper-transient-finder --ref prepared_reference/survey_reference.fits --new prepared_reference/science_for_reference.fits --reproject --output results/mosaic_001
+python scripts\prepare_survey_mosaic.py --science science.fits --survey panstarrs --template-filter r --cache survey_cache --output prepared_reference --check-only
+python scripts\prepare_survey_mosaic.py --science science.fits --survey panstarrs --template-filter r --cache survey_cache --output prepared_reference --max-download-mb 512 --timeout 300
+proper-transient-finder --ref prepared_reference\survey_reference.fits --new prepared_reference\science_for_reference.fits --reproject --output results\mosaic_001
 ```
 
 The preparer uses 24.9-arcminute Pan-STARRS or 9.8-arcminute SkyMapper tiles,
-with overlap, and creates a native-survey-scale WCS mosaic covering the complete
-science footprint. It does not modify either input. If the padded footprint is
-at most 5% over a single safe tile, it instead makes a separate centred,
-WCS-preserving science crop and downloads one reference cutout. Set
-`--single-tile-overrun 0` to always mosaic an oversized field. Inspect the
-auditable `survey_mosaic.json` and retain the normal survey calibration and
-cross-filter cautions: mosaicking does not establish compatible units,
-passbands, epochs, or candidate reality.
+with overlap. Full valid coverage is required by default. For tiled mosaics,
+`--max-missing-fraction 0.1` explicitly permits up to 10% missing science-grid
+coverage; those pixels remain masked and sources there cannot be detected.
+`--crop-border-percent` instead removes 5% from each edge before downloading;
+that retains about 81% of the image area. Both options are opt-in and may be
+combined. If a padded footprint is at most 5% over one safe tile, the default
+automatic centred crop can avoid a mosaic; use `--single-tile-overrun 0` to
+disable that automatic crop. Inspect `survey_mosaic.json` for the actual plan,
+coverage and warnings.
+
+The defaults are 64 MB per FITS response and a 30-second network timeout; the
+example raises these limits for large tiles. Downloads can require substantial
+memory and disk space. `--overwrite` explicitly stages replacement preparer
+products while preserving unrelated files; without it, the output directory
+must be new or empty. Completed tiles remain reusable in the separate cache.
+Pan-STARRS masks are taken from the native bitmask, and older cached mask
+cutouts are upgraded in separate cache files.
+
+Use the prepared science copy in the local pipeline, especially if it was
+cropped. Verify both inputs' filter labels, units and noise calibration first:
+`--science-filter` informs the survey plan but does not insert a `FILTER` header
+into the prepared science FITS. Different bands require explicit experimental
+cross-filter handling; missing or ambiguous BUNIT requires a verified
+`--reproject-units` choice. No option converts the pixels or makes different
+bandpasses equivalent. See [the full preparer guide](USER_GUIDE.md#standalone-large-footprint-mosaic-preparer).
 
 ## Medium FITS Robustness And Timing
 
