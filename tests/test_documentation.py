@@ -94,7 +94,7 @@ def test_project_instructions_match_repository_layout(tmp_path: Path) -> None:
     expected = {
         "run_proper_transient_finder.py",
         "src/proper_transient_finder/astro.py",
-        "tests/test_survey_mosaic.py",
+        "tests/test_survey_hips.py",
         "experiments/robustness.py",
         "scripts/generate_docs.py",
         "scripts/lint.ps1",

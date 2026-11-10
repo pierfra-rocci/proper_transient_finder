@@ -1,12 +1,20 @@
 # Author: Pier-Francesco Rocci
 # Developed with assistance from ChatGPT, Claude, and Mistral.
 
-"""Opt-in survey reference acquisition around the existing comparison pipeline."""
+"""Opt-in HiPS survey reference acquisition around the comparison pipeline.
+
+Templates are requested from the CDS ``hips2fits`` service on the exact
+science pixel grid (WCS and shape), so no local mosaic or a second
+reprojection is required.  The module only prepares cache-owned FITS copies;
+the science input is never edited and the ordinary comparison pipeline performs
+the PSF matching, photometry, and candidate vetting.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import ssl
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
@@ -16,32 +24,68 @@ from tempfile import NamedTemporaryFile
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 from urllib.error import URLError
-from urllib.parse import parse_qs, quote, urlencode, urlsplit
+from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import numpy as np
 from astropy.io import fits
-from astropy.table import Table
 from astropy.wcs import WCS
 
+from ._version import __version__
 from .astro import _science_hdu
 
 if TYPE_CHECKING:
     from .api import BatchResult, PipelineResult
     from .astro import PipelineConfig
 
-SURVEY_FILTERS = {"panstarrs": "grizy", "skymapper": "uvgriz"}
-SURVEY_HOSTS = {"ps1images.stsci.edu", "api.skymapper.nci.org.au"}
-SURVEY_WARNING = (
-    "Survey/instrument bandpasses can differ even when filter names match. "
-    "Resampled or coadded reference noise may be correlated; errors are approximate. "
-    "Candidates require independent confirmation."
+# HiPS identifiers accepted by CDS hips2fits.  SkyMapper DR4 publishes only
+# g, i and r HiPS maps; Pan-STARRS DR1 publishes all five broad bands.
+SURVEY_HIPS = {
+    "panstarrs": {
+        "g": "PanSTARRS/DR1/g",
+        "r": "PanSTARRS/DR1/r",
+        "i": "PanSTARRS/DR1/i",
+        "z": "PanSTARRS/DR1/z",
+        "y": "PanSTARRS/DR1/y",
+    },
+    "skymapper": {
+        "g": "CDS/P/Skymapper/DR4/g",
+        "r": "CDS/P/Skymapper/DR4/r",
+        "i": "CDS/P/Skymapper/DR4/i",
+    },
+}
+SURVEY_FILTERS = {name: "".join(bands) for name, bands in SURVEY_HIPS.items()}
+# Conservative nominal coverage used only to select a default provider.
+SURVEY_COVERAGE = {"panstarrs": (-30.0, 90.0), "skymapper": (-90.0, 0.0)}
+SURVEY_HOSTS = {
+    "alasky.cds.unistra.fr",
+    "alaskybis.cds.unistra.fr",
+    "alasky.u-strasbg.fr",
+    "alaskybis.u-strasbg.fr",
+}
+HIPS_SERVICE_URLS = (
+    "https://alasky.cds.unistra.fr/hips-image-services/hips2fits",
+    "https://alasky.u-strasbg.fr/hips-image-services/hips2fits",
 )
+MOC_SERVICE_URLS = (
+    "https://alasky.cds.unistra.fr/MocServer/query",
+    "https://alasky.u-strasbg.fr/MocServer/query",
+)
+SURVEY_WARNING = (
+    "HiPS survey templates are coadded, resampled products rather than original "
+    "detector counts. Flux scales, bandpasses and noise are approximate, and "
+    "candidates require independent confirmation."
+)
+DEFAULT_MAX_DOWNLOAD_MB = 512
+_GRID_TOLERANCE_DEG = 1e-5
+_BAND_TOKEN = re.compile(r"[A-Za-z]\d?")
+_EXPLICIT_BAND_MAX_LENGTH = 16
+_MOC_RESPONSE_LIMIT = 1_000_000
 
 
 @dataclass(frozen=True)
 class TemplateRequest:
-    """Validated science footprint and explicitly selected survey band."""
+    """Validated science pixel grid and explicitly selected HiPS template band."""
 
     science_fits: Path
     survey: str
@@ -52,6 +96,10 @@ class TemplateRequest:
     dec_deg: float
     size_deg: float
     science_mjd: float | None
+    hips_id: str = ""
+    width: int = 0
+    height: int = 0
+    grid_sha256: str = ""
 
     def to_dict(self) -> dict:
         values = asdict(self)
@@ -62,12 +110,80 @@ class TemplateRequest:
 def normalize_filter(value: str) -> str:
     """Recognize explicit band aliases, without claiming identical bandpasses."""
     label = str(value).strip().lower()
-    for prefix in ("sloan-", "sdss-", "ps1-", "skymapper-"):
+    for prefix in ("sloan-", "sdss-", "ps1-", "panstarrs-", "skymapper-"):
         if label.startswith(prefix):
             label = label[len(prefix) :]
     if not label or label == "unknown":
         raise ValueError("Science FILTER is missing; provide science_filter explicitly")
     return label
+
+
+def _science_header_shape(path: Path) -> tuple[fits.Header, tuple[int, int]]:
+    with fits.open(path, memmap=False) as hdus:
+        image = _science_hdu(hdus)
+        if image.data is None or image.data.ndim != 2:
+            raise ValueError("Science input must contain one two-dimensional image")
+        header = hdus[0].header.copy()
+        header.update(image.header)
+        shape = tuple(int(value) for value in image.data.shape)
+    return header, shape
+
+
+def _celestial_wcs(header: fits.Header, *, purpose: str) -> WCS:
+    wcs = WCS(header)
+    if wcs.pixel_n_dim != 2 or not wcs.has_celestial:
+        raise ValueError(f"{purpose} requires valid two-dimensional celestial WCS")
+    return wcs.celestial
+
+
+def _grid_sha256(wcs: WCS, shape: tuple[int, int]) -> str:
+    header = wcs.to_header(relax=True)
+    payload = {
+        "header": header.tostring(sep="\n", endcard=True, padding=False),
+        "shape": list(shape),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def _resolve_hips_id(survey: str, band: str) -> str:
+    if "/" in survey:
+        identifier = survey.strip()
+        if (
+            not identifier
+            or not identifier.isascii()
+            or not identifier.isprintable()
+            or any(character.isspace() for character in identifier)
+            or any(character in "*?," for character in identifier)
+        ):
+            raise ValueError("Explicit HiPS identifier must be a single printable ASCII identifier")
+        trailing = identifier.rstrip("/").rsplit("/", 1)[-1]
+        if _BAND_TOKEN.fullmatch(trailing) and trailing.casefold() != band:
+            raise ValueError("HiPS identifier band does not match template_filter")
+        return identifier
+    mapping = SURVEY_HIPS.get(survey)
+    if mapping is None or band not in mapping:
+        raise ValueError(
+            "Requested survey/filter is not available as a HiPS template; "
+            "choose a supported provider/band or pass an explicit HiPS identifier"
+        )
+    return mapping[band]
+
+
+def _select_survey(boundary, survey: str, band: str) -> str:
+    if "/" in survey:
+        return survey.strip()
+    if survey not in {"auto", *SURVEY_FILTERS}:
+        raise ValueError("Survey must be auto, panstarrs, skymapper, or a HiPS identifier")
+    available = []
+    for provider, (minimum, maximum) in SURVEY_COVERAGE.items():
+        if band not in SURVEY_HIPS[provider]:
+            continue
+        if np.min(boundary.dec.deg) >= minimum and np.max(boundary.dec.deg) <= maximum:
+            available.append(provider)
+    selected = available[0] if survey == "auto" and available else survey
+    if selected not in available:
+        raise ValueError("Requested survey/filter does not cover the complete science footprint")
+    return selected
 
 
 def prepare_template_request(
@@ -77,17 +193,17 @@ def prepare_template_request(
     survey: str = "auto",
     science_filter: str | None = None,
 ) -> TemplateRequest:
-    """Read only science input; derive a padded WCS footprint without network or writes."""
+    """Read only the science input and describe the HiPS request without network use.
+
+    The returned request asks the service for exactly the science WCS and shape,
+    so the whole footprint is covered by a single HiPS cutout; no local tiling or
+    mosaic is planned.  Nothing is downloaded or written here.
+    """
     path = Path(science_fits).expanduser().resolve()
-    with fits.open(path, memmap=False) as hdus:
-        image = _science_hdu(hdus)
-        header, shape = hdus[0].header.copy(), image.data.shape
-        header.update(image.header)
-    wcs = WCS(header)
-    if wcs.pixel_n_dim != 2 or not wcs.has_celestial:
-        raise ValueError("Survey templates require valid two-dimensional celestial WCS")
+    header, shape = _science_header_shape(path)
+    wcs = _celestial_wcs(header, purpose="Survey templates")
     height, width = shape
-    center = wcs.celestial.pixel_to_world((width - 1) / 2, (height - 1) / 2).icrs
+    center = wcs.pixel_to_world((width - 1) / 2, (height - 1) / 2).icrs
     positions = np.linspace(0, 1, 17)
     columns = np.concatenate(
         (positions * (width - 1), positions * (width - 1), np.zeros(17), np.full(17, width - 1))
@@ -95,31 +211,25 @@ def prepare_template_request(
     rows = np.concatenate(
         (np.zeros(17), np.full(17, height - 1), positions * (height - 1), positions * (height - 1))
     )
-    boundary = wcs.celestial.pixel_to_world(columns, rows).icrs
+    boundary = wcs.pixel_to_world(columns, rows).icrs
     radius = float(np.max(center.separation(boundary).deg))
     if not np.isfinite(radius) or not 0 < radius < 1:
         raise ValueError("Science WCS footprint is invalid or too large for survey cutouts")
+    survey_value = str(survey).strip()
     band = str(template_filter).strip().lower()
-    if len(band) != 1:
+    if "/" in survey_value:
+        if (
+            not band
+            or len(band) > _EXPLICIT_BAND_MAX_LENGTH
+            or not band.isascii()
+            or not band.isprintable()
+            or any(character.isspace() or character in "/\\" for character in band)
+        ):
+            raise ValueError("Specify one explicit HiPS band label")
+    elif len(band) != 1:
         raise ValueError("Specify one supported template filter")
-    available = []
-    if np.min(boundary.dec.deg) >= -30 and band in SURVEY_FILTERS["panstarrs"]:
-        available.append("panstarrs")
-    if np.max(boundary.dec.deg) <= 0 and band in SURVEY_FILTERS["skymapper"]:
-        available.append("skymapper")
-    selected = available[0] if survey == "auto" and available else survey
-    if selected not in SURVEY_FILTERS or selected not in available:
-        raise ValueError("Requested survey/filter does not cover the complete science footprint")
-    size = max(2 * radius * 1.1, 32 / 3600)
-    limit = 9.9 / 60 if selected == "skymapper" else 6000 * 0.25 / 3600
-    if size >= limit:
-        raise ValueError(
-            f"Padded science footprint requires a {size * 60:.2f} arcmin square; "
-            f"{selected} requires a cutout smaller than {limit * 60:.2f} arcmin. "
-            "Use a separate WCS-preserving science crop, process tiles explicitly, "
-            "or provide a larger local reference with --ref/--new --reproject. "
-            "Automatic tiling is not implemented."
-        )
+    selected = _select_survey(boundary, survey_value, band)
+    hips_id = _resolve_hips_id(selected, band)
     native = str(header.get("FILTER", "")).strip()
     label = normalize_filter(science_filter if science_filter is not None else native)
     mjd = header.get("MJD-OBS")
@@ -137,14 +247,18 @@ def prepare_template_request(
         native,
         float(center.ra.deg),
         float(center.dec.deg),
-        size,
+        max(2 * radius * 1.1, 32 / 3600),
         None if mjd is None else float(mjd),
+        hips_id,
+        width,
+        height,
+        _grid_sha256(wcs, shape),
     )
 
 
 @dataclass(frozen=True)
 class SurveyTemplate:
-    """Locally cached native survey FITS and auditable acquisition metadata."""
+    """Locally cached HiPS FITS on the science grid and auditable metadata."""
 
     fits_path: Path
     metadata: dict
@@ -170,7 +284,7 @@ class _SurveyRedirect(HTTPRedirectHandler):
 
 def _download_url(url: str, timeout: float, limit: int) -> bytes:
     _validate_url(url)
-    request = Request(url, headers={"User-Agent": "ProperTransientFinder/0.1"})
+    request = Request(url, headers={"User-Agent": f"ProperTransientFinder/{__version__}"})
     try:
         with build_opener(_SurveyRedirect()).open(request, timeout=timeout) as response:
             length = response.headers.get("Content-Length")
@@ -191,86 +305,162 @@ def _download_url(url: str, timeout: float, limit: int) -> bytes:
     return payload
 
 
-def _discover_template(request: TemplateRequest, timeout: float) -> dict:
-    if request.survey == "panstarrs":
-        query = urlencode(
-            {
-                "ra": request.ra_deg,
-                "dec": request.dec_deg,
-                "filters": request.template_filter,
-                "type": "stack,stack.wt,stack.mask",
-            }
-        )
-        url = "https://ps1images.stsci.edu/cgi-bin/ps1filenames.py?" + query
-        table = Table.read(
-            _download_url(url, timeout, 4_000_000).decode("utf-8"), format="ascii.basic"
-        )
-        rows = [row for row in table if str(row["filter"]) == request.template_filter]
-        images = [row for row in rows if str(row["type"]) == "stack" and not int(row["badflag"])]
-        if not images:
-            raise ValueError("No usable Pan-STARRS template covers the requested field/filter")
-        selected = sorted(images, key=lambda row: str(row["filename"]))[0]
-        base = str(selected["filename"])
+def _science_grid(request: TemplateRequest) -> tuple[WCS, fits.Header, tuple[int, int]]:
+    """Return the science celestial WCS, a hips2fits WCS header and the shape."""
+    header, shape = _science_header_shape(Path(request.science_fits))
+    wcs = _celestial_wcs(header, purpose="Survey templates")
+    hips_header = wcs.to_header(relax=True)
+    if hips_header.get("CTYPE1") == "RA---TPV" and "PV1_0" not in hips_header:
+        # hips2fits rejects TPV headers without distortion coefficients.
+        hips_header["CTYPE1"] = "RA---TAN"
+        hips_header["CTYPE2"] = "DEC--TAN"
+    hips_header["NAXIS1"] = shape[1]
+    hips_header["NAXIS2"] = shape[0]
+    return wcs, hips_header, shape
 
-        def cutout(filename: str) -> str:
-            parameters = {
-                "ra": request.ra_deg,
-                "dec": request.dec_deg,
-                "size": int(np.ceil(request.size_deg * 3600 / 0.25)),
-                "format": "fits",
-                "red": filename,
-            }
-            return "https://ps1images.stsci.edu/cgi-bin/fitscut.cgi?" + urlencode(parameters)
 
-        products = {str(row["type"]): str(row["filename"]) for row in rows}
-        weight = base.removesuffix(".fits") + ".wt.fits"
-        mask = base.removesuffix(".fits") + ".mask.fits"
-        return {
-            "query_url": url,
-            "image_url": cutout(base),
-            "image_id": base,
-            "variance_url": cutout(weight) if weight in products.values() else None,
-            "mask_url": cutout(mask) if mask in products.values() else None,
-            "product": "stack",
-            "mjd": None,
-        }
+def _linearize_asinh(image: np.ndarray) -> np.ndarray:
+    """Undo Pan-STARRS asinh scaling as used by the CDS HiPS maps."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        exponent = image * 0.4 * np.log(10)
+        return np.exp(exponent) - np.exp(-exponent)
+
+
+def _uses_asinh(hips_id: str) -> bool:
+    label = hips_id.strip().casefold().rstrip("/")
+    return "panstarrs" in label and not label.endswith("/g")
+
+
+def _download_hips(request: TemplateRequest, timeout: float, limit: int) -> tuple[bytes, str, str]:
+    """Request one HiPS cutout covering the full science grid, with host fallback."""
+    _, wcs_header, shape = _science_grid(request)
+    hips_id = request.hips_id or _resolve_hips_id(request.survey, request.template_filter)
     parameters = {
-        "POS": f"{request.ra_deg},{request.dec_deg}",
-        "SIZE": request.size_deg,
-        "BAND": request.template_filter,
-        "FORMAT": "image/fits",
-        "INTERSECT": "covers",
-        "VERB": 3,
+        "hips": hips_id,
+        "width": shape[1],
+        "height": shape[0],
+        "coordsys": "icrs",
+        "format": "fits",
+        "wcs": json.dumps(dict(wcs_header), sort_keys=True),
     }
-    if request.science_mjd is not None:
-        parameters["MJD_END"] = request.science_mjd
-    url = "https://api.skymapper.nci.org.au/public/siap/dr4/query?" + urlencode(parameters)
-    table = Table.read(BytesIO(_download_url(url, timeout, 4_000_000)), format="votable")
-    rows = [
-        row
-        for row in table
-        if str(row["band"]).strip() == request.template_filter
-        and np.isfinite(float(row["mjd_obs"]))
-        and (request.science_mjd is None or float(row["mjd_obs"]) < request.science_mjd)
-    ]
-    if not rows:
-        raise ValueError("No usable older SkyMapper image covers the requested field/filter")
-    selected = sorted(
-        rows,
-        key=lambda row: (
-            -float(row["exptime"]),
-            float(row["mean_fwhm"]),
-            str(row["unique_image_id"]),
-        ),
-    )[0]
+    failures = []
+    for base in HIPS_SERVICE_URLS:
+        url = base + "?" + urlencode(parameters)
+        try:
+            return _download_url(url, timeout, limit), url, hips_id
+        except OSError as error:
+            failures.append(f"{urlsplit(base).hostname}: {error}")
+    raise URLError("HiPS download failed for every service host: " + "; ".join(failures))
+
+
+def _stc_polygon(wcs: WCS, shape: tuple[int, int], samples: int = 33) -> str:
+    """Return the science footprint as a closed ICRS STC-S polygon."""
+    height, width = shape
+    positions = np.linspace(0.0, 1.0, samples)
+    edges = (
+        (positions, np.zeros(samples)),
+        (np.ones(samples), positions),
+        (positions[::-1], np.ones(samples)),
+        (np.zeros(samples), positions[::-1]),
+    )
+    columns = np.concatenate([edge[0] for edge in edges]) * (width - 1)
+    rows = np.concatenate([edge[1] for edge in edges]) * (height - 1)
+    points = np.column_stack((columns, rows))
+    keep = np.r_[True, np.any(np.diff(points, axis=0) != 0, axis=1)]
+    points = points[keep]
+    if len(points) > 1 and np.array_equal(points[0], points[-1]):
+        points = points[:-1]
+    sky = wcs.pixel_to_world(points[:, 0], points[:, 1]).icrs
+    center = wcs.pixel_to_world((width - 1) / 2, (height - 1) / 2).icrs
+    # Keep longitudes continuous for footprints crossing the RA=0 seam.
+    right_ascension = center.ra.deg + ((sky.ra.deg - center.ra.deg + 180.0) % 360.0 - 180.0)
+    declination = sky.dec.deg
+    if not np.all(np.isfinite(right_ascension)) or not np.all(np.isfinite(declination)):
+        raise ValueError("Science WCS does not define a finite footprint polygon")
+    vertices = " ".join(
+        f"{longitude:.6f} {latitude:.6f}"
+        for longitude, latitude in zip(right_ascension, declination, strict=True)
+    )
+    return "Polygon " + vertices
+
+
+def _moc_record_ids(payload: bytes) -> list[str]:
+    """Extract dataset identifiers from a MOCServer JSON record response."""
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("MOC coverage response is not valid JSON") from error
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        raise ValueError("MOC coverage response is not a JSON list")
+    identifiers = []
+    for item in data:
+        if isinstance(item, str):
+            identifiers.append(item)
+        elif isinstance(item, dict):
+            for key in ("ID", "id"):
+                value = item.get(key)
+                if isinstance(value, str) and value:
+                    identifiers.append(value)
+                    break
+    return identifiers
+
+
+def _check_hips_coverage(request: TemplateRequest, timeout: float, *, enabled: bool = True) -> dict:
+    """Ask the CDS MOCServer whether an explicit HiPS contains the science footprint."""
+    hips_id = request.hips_id or _resolve_hips_id(request.survey, request.template_filter)
+    result = {
+        "service": "CDS MOCServer",
+        "hips_id": hips_id,
+        "intersect": "enclosed",
+    }
+    if "/" not in request.survey:
+        return {**result, "status": "not_required", "covered": None}
+    if not enabled:
+        return {
+            **result,
+            "status": "skipped",
+            "covered": None,
+            "reason": "disabled by request",
+        }
+    wcs, _, shape = _science_grid(request)
+    polygon = _stc_polygon(wcs, shape)
+    parameters = {
+        "ID": hips_id,
+        "stc": polygon,
+        "intersect": "enclosed",
+        "get": "record",
+        "fields": "ID",
+        "fmt": "json",
+    }
+    failures = []
+    for base in MOC_SERVICE_URLS:
+        url = base + "?" + urlencode(parameters)
+        try:
+            identifiers = _moc_record_ids(_download_url(url, timeout, _MOC_RESPONSE_LIMIT))
+        except (OSError, ValueError) as error:
+            failures.append(f"{urlsplit(base).hostname}: {error}")
+            continue
+        covered = any(
+            identifier == hips_id or identifier.casefold() == hips_id.casefold()
+            for identifier in identifiers
+        )
+        checked = {
+            **result,
+            "status": "covered" if covered else "not_covered",
+            "covered": covered,
+            "query_url": url,
+            "polygon_vertices": (len(polygon.split()) - 1) // 2,
+        }
+        if identifiers and not covered:
+            checked["matched_ids"] = identifiers[:10]
+        return checked
     return {
-        "query_url": url,
-        "image_url": str(selected["get_fits"]),
-        "mask_url": str(selected["get_mask"]),
-        "variance_url": None,
-        "image_id": str(selected["unique_image_id"]),
-        "product": str(selected["image_type"]),
-        "mjd": float(selected["mjd_obs"]),
+        **result,
+        "status": "unavailable",
+        "covered": None,
+        "error": "; ".join(failures) or "no MOC service response",
     }
 
 
@@ -279,53 +469,22 @@ def _fits_image(payload: bytes) -> tuple[np.ndarray, fits.Header]:
         image = _science_hdu(hdus)
         header = hdus[0].header.copy()
         header.update(image.header)
-        return np.array(image.data, copy=True), header
+        return np.array(image.data, dtype=float, copy=True), header
 
 
-def _panstarrs_native_mask(
-    cutout_url: str,
-    image_header: fits.Header,
-    image_shape: tuple[int, int],
-    timeout: float,
-    limit: int,
-) -> tuple[np.ndarray, str]:
-    _validate_url(cutout_url)
-    parsed = urlsplit(cutout_url)
-    names = parse_qs(parsed.query).get("red", [])
-    if (
-        parsed.hostname != "ps1images.stsci.edu"
-        or parsed.path != "/cgi-bin/fitscut.cgi"
-        or len(names) != 1
-        or not names[0].endswith(".mask.fits")
-        or any(part in {".", ".."} for part in names[0].split("/"))
-    ):
-        raise ValueError("Invalid Pan-STARRS native mask filename")
-    raw_url = "https://ps1images.stsci.edu/" + quote(names[0].lstrip("/"), safe="/")
-    native, native_header = _fits_image(_download_url(raw_url, timeout, limit))
-    if native.ndim != 2 or native.dtype.kind not in "ui":
-        raise ValueError("Pan-STARRS native mask is not a two-dimensional integer bitmask")
-    if native.size == 0 or np.min(native) < 0 or np.max(native) > 65535:
-        raise ValueError("Pan-STARRS native mask contains invalid bit values")
-    height, width = image_shape
-    columns = np.array([0, (width - 1) / 2, width - 1] * 3)
-    rows = np.repeat([0, (height - 1) / 2, height - 1], 3)
-    world = WCS(image_header).celestial.all_pix2world(columns, rows, 0)
-    native_columns, native_rows = WCS(native_header).celestial.all_world2pix(*world, 0)
-    offsets_x, offsets_y = native_columns - columns, native_rows - rows
-    if not np.all(np.isfinite(offsets_x)) or not np.all(np.isfinite(offsets_y)):
-        raise ValueError("Pan-STARRS native mask WCS cannot be aligned to the cutout")
-    offset_x, offset_y = int(round(float(offsets_x[0]))), int(round(float(offsets_y[0])))
-    if not (
-        np.allclose(offsets_x, offset_x, atol=1e-3, rtol=0)
-        and np.allclose(offsets_y, offset_y, atol=1e-3, rtol=0)
-    ):
-        raise ValueError("Pan-STARRS native mask is not pixel-aligned with the cutout")
-    result = np.full(image_shape, 65535, dtype=np.uint16)
-    x0, y0 = max(0, -offset_x), max(0, -offset_y)
-    x1, y1 = min(width, native.shape[1] - offset_x), min(height, native.shape[0] - offset_y)
-    if x0 < x1 and y0 < y1:
-        result[y0:y1, x0:x1] = native[y0 + offset_y : y1 + offset_y, x0 + offset_x : x1 + offset_x]
-    return result, raw_url
+def _grid_matches(header: fits.Header, science_wcs: WCS, shape: tuple[int, int]) -> bool:
+    returned = WCS(header)
+    if returned.pixel_n_dim != 2 or not returned.has_celestial:
+        return False
+    height, width = shape
+    rows = np.array([0, 0, height - 1, height - 1, (height - 1) / 2])
+    columns = np.array([0, width - 1, 0, width - 1, (width - 1) / 2])
+    expected = science_wcs.all_pix2world(columns, rows, 0)
+    actual = returned.celestial.all_pix2world(columns, rows, 0)
+    return bool(
+        np.all(np.isfinite(actual))
+        and np.allclose(actual, expected, atol=_GRID_TOLERANCE_DEG, rtol=0)
+    )
 
 
 def _cached_template(path: Path, manifest: Path) -> SurveyTemplate | None:
@@ -360,105 +519,132 @@ def fetch_survey_template(
     cache_dir: str | Path,
     *,
     timeout: float = 30,
-    max_download_mb: float = 64,
+    max_download_mb: float = DEFAULT_MAX_DOWNLOAD_MB,
+    check_moc_coverage: bool = True,
 ) -> SurveyTemplate:
-    """Download bounded HTTPS FITS products, or verify and reuse a cached template."""
+    """Download one bounded HiPS FITS, or verify and reuse a cached template.
+
+    The returned image is already projected onto the requested science WCS and
+    shape.  Pan-STARRS asinh values are linearized, non-finite pixels are masked,
+    and no variance plane is invented.  Explicit HiPS identifiers are checked
+    against the CDS MOCServer coverage map before downloading unless
+    ``check_moc_coverage`` is false.  The service image is cached with a
+    checksum-verified JSON manifest.
+    """
     if not np.isfinite(timeout) or timeout <= 0 or not 0 < max_download_mb <= 512:
         raise ValueError("Use finite positive timeout and download limit (at most 512 MB)")
-    cache = Path(cache_dir).expanduser().resolve()
+    if not isinstance(check_moc_coverage, bool):
+        raise ValueError("check_moc_coverage must be a boolean")
+    science_wcs, _, shape = _science_grid(request)
+    hips_id = request.hips_id or _resolve_hips_id(request.survey, request.template_filter)
     identity = request.to_dict()
     identity.pop("science_fits")
     identity.pop("native_science_filter")
     identity.pop("science_filter")
+    identity.update(
+        backend="cds-hips2fits",
+        hips_id=hips_id,
+        width=shape[1],
+        height=shape[0],
+        grid_sha256=_grid_sha256(science_wcs, shape),
+    )
     key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-    legacy_path, legacy_manifest = cache / f"{key}.fits", cache / f"{key}.json"
-    suffix = ".native-mask-v1" if request.survey == "panstarrs" else ""
-    path, manifest = cache / f"{key}{suffix}.fits", cache / f"{key}{suffix}.json"
+    cache = Path(cache_dir).expanduser().resolve()
+    path, manifest = cache / f"{key}.hips.fits", cache / f"{key}.hips.json"
     cached = _cached_template(path, manifest)
     if cached is not None:
         return cached
+    coverage = _check_hips_coverage(request, timeout, enabled=check_moc_coverage)
+    if coverage["status"] == "not_covered":
+        raise ValueError(
+            f"CDS MOC coverage pre-check failed for {hips_id}: the survey MOC does not "
+            "enclose the complete science footprint, or the identifier is not registered "
+            "with the CDS MOCServer. Choose another HiPS identifier, a named provider, "
+            "or a local reference."
+        )
     limit = int(max_download_mb * 1_000_000)
-    if suffix:
-        legacy = _cached_template(legacy_path, legacy_manifest)
-        if legacy is not None:
-            mask_url = legacy.metadata.get("mask_url")
-            if not mask_url:
-                return legacy
-            with fits.open(legacy.fits_path, memmap=False) as hdus:
-                image = _science_hdu(hdus)
-                primary = hdus[0]
-                if not isinstance(primary, fits.PrimaryHDU):
-                    raise ValueError("Cached survey FITS is missing its primary HDU")
-                data = image.data
-                if data is None or data.ndim != 2:
-                    raise ValueError("Cached survey FITS has no two-dimensional science plane")
-                header = primary.header.copy()
-                header.update(image.header)
-                mask, raw_url = _panstarrs_native_mask(mask_url, header, data.shape, timeout, limit)
-                if "MASK" not in hdus:
-                    raise ValueError("Cached Pan-STARRS template is missing its mask plane")
-                mask_hdu = hdus["MASK"]
-                if not isinstance(mask_hdu, (fits.ImageHDU, fits.CompImageHDU)):
-                    raise ValueError("Cached Pan-STARRS mask is not an image plane")
-                mask_hdu.data = mask
-                metadata = {**legacy.metadata, "native_mask_url": raw_url}
-                _write_template_cache(path, manifest, hdus, metadata)
-            return SurveyTemplate(path, metadata)
-    selected = _discover_template(request, timeout)
-    data, header = _fits_image(_download_url(selected["image_url"], timeout, limit))
-    wcs = WCS(header)
-    if not wcs.has_celestial or not np.isfinite(data).any():
-        raise ValueError("Downloaded template has no usable celestial WCS or finite pixels")
-    column, row = wcs.celestial.world_to_pixel_values(request.ra_deg, request.dec_deg)
-    if not (0 <= column < data.shape[1] and 0 <= row < data.shape[0]):
-        raise ValueError("Downloaded template does not contain the requested science center")
-    native_filter = str(header.get("FILTER", header.get("FPA.FILTER", ""))).strip()
-    if native_filter and normalize_filter(native_filter.split(".")[0]) != request.template_filter:
-        raise ValueError("Downloaded template filter does not match the selected service band")
+    payload, query_url, hips_id = _download_hips(request, timeout, limit)
+    data, header = _fits_image(payload)
+    if data.shape != shape:
+        raise ValueError(
+            f"Downloaded HiPS template shape {data.shape} does not match the science grid {shape}"
+        )
+    if not _grid_matches(header, science_wcs, shape):
+        raise ValueError("Downloaded HiPS template does not match the science pixel grid")
+    native_filter = str(header.get("FILTER", "")).strip()
+    native_bunit = str(header.get("BUNIT", "")).strip()
+    asinh = _uses_asinh(hips_id)
+    if asinh:
+        data = _linearize_asinh(data)
+    valid = np.isfinite(data)
+    data = np.where(valid, data, np.nan)
+    mask = (~valid).astype(np.uint8)
+    for keyword in (
+        "SIMPLE",
+        "BITPIX",
+        "NAXIS",
+        "EXTEND",
+        "BSCALE",
+        "BZERO",
+        "CHECKSUM",
+        "DATASUM",
+    ):
+        header.pop(keyword, None)
+    header.update(science_wcs.to_header(relax=True))
+    header["NAXIS1"], header["NAXIS2"] = shape[1], shape[0]
     header["FILTER"] = request.template_filter
-    hdus = [fits.PrimaryHDU(data, header)]
-    for kind, extension in (("variance_url", "VAR"), ("mask_url", "MASK")):
-        if selected.get(kind):
-            if kind == "mask_url" and request.survey == "panstarrs":
-                auxiliary, raw_url = _panstarrs_native_mask(
-                    selected[kind], header, data.shape, timeout, limit
-                )
-                selected["native_mask_url"] = raw_url
-            else:
-                auxiliary, auxiliary_header = _fits_image(
-                    _download_url(selected[kind], timeout, limit)
-                )
-                if auxiliary.shape != data.shape:
-                    raise ValueError("Survey mask/variance shape does not match its image")
-                reference_pixels = np.array([[0, 0], [data.shape[1] - 1, data.shape[0] - 1]])
-                if not np.allclose(
-                    WCS(auxiliary_header).celestial.all_pix2world(reference_pixels, 0),
-                    wcs.celestial.all_pix2world(reference_pixels, 0),
-                    atol=1e-7,
-                    rtol=0,
-                ):
-                    raise ValueError("Survey mask/variance WCS does not match its image")
-            hdus.append(fits.ImageHDU(auxiliary, name=extension))
-    mjd = header.get("MJD-OBS", selected.get("mjd"))
-    if request.science_mjd is not None and mjd is not None and float(mjd) >= request.science_mjd:
-        raise ValueError("Reference template epoch is not older than the science exposure")
-    warnings = [SURVEY_WARNING]
-    if request.science_mjd is None or mjd is None or selected["product"] == "stack":
-        warnings.append("Template chronology is not certified; coadd epochs may span an interval.")
-    if not selected.get("variance_url"):
-        warnings.append("No survey variance plane; a validated count-space gain model is required.")
+    header["BUNIT"] = "relative-flux"
+    header["HIPS"] = (hips_id, "HiPS template identifier")
+    header["HIPSASIN"] = (asinh, "Pan-STARRS asinh values were linearized")
+    header.add_history("HiPS template projected onto the science pixel grid by CDS hips2fits.")
+    warnings = [
+        SURVEY_WARNING,
+        "HiPS products have no variance plane; noise is estimated from the image background.",
+        "Template chronology is not certified; a HiPS coadd may include the science epoch.",
+    ]
+    if asinh:
+        warnings.append(
+            "Pan-STARRS HiPS values were linearized from asinh scaling; the flux zero point "
+            "is not calibrated."
+        )
+    if coverage["status"] == "unavailable":
+        warnings.append(
+            "CDS MOC coverage pre-check was unavailable "
+            f"({coverage.get('error', 'no response')}); acquisition continued and the "
+            "downloaded HiPS grid and pixels were validated separately."
+        )
+    if coverage["status"] == "skipped":
+        warnings.append(
+            "CDS MOC coverage pre-check was explicitly disabled; HiPS coverage was not "
+            "verified before download."
+        )
+    if not native_filter:
+        warnings.append(
+            "The HiPS header does not declare FILTER; the requested band label was applied."
+        )
     metadata = {
         **identity,
-        **selected,
-        "native_reference_filter": native_filter,
-        "native_bunit": str(header.get("BUNIT", "")),
-        "reference_mjd": mjd,
+        "query_url": query_url,
+        "service": "CDS hips2fits",
+        "image_id": hips_id,
+        "product": "hips",
+        "mjd": None,
+        "reference_mjd": None,
+        "native_reference_filter": native_filter or request.template_filter,
+        "native_bunit": native_bunit,
+        "asinh_linearized": asinh,
+        "shape": [shape[0], shape[1]],
+        "variance_source": "none",
+        "coverage_check": coverage,
         "warnings": warnings,
-        "variance_source": "Pan-STARRS stack.wt pixel variance"
-        if selected.get("variance_url")
-        else "none",
     }
-    _write_template_cache(path, manifest, fits.HDUList(hdus), metadata)
+    hdus = fits.HDUList(
+        [
+            fits.PrimaryHDU(data, header),
+            fits.ImageHDU(mask, name="MASK"),
+        ]
+    )
+    _write_template_cache(path, manifest, hdus, metadata)
     return SurveyTemplate(path, metadata)
 
 
@@ -469,8 +655,8 @@ def _count_unit(value: str) -> str:
     if label in {"electron", "electrons", "e-"}:
         return "electron"
     raise ValueError(
-        "Survey workflow requires declared detector-count units; ambiguous template BUNIT "
-        "requires template_units (adu or electron). Calibrate other units first."
+        "Survey workflow requires declared detector-count units (adu or electron); "
+        "calibrate other science or template units first."
     )
 
 
@@ -506,24 +692,29 @@ def _survey_options(
     template_units=None,
     template_gain=None,
     timeout=30,
-    max_download_mb=64,
+    max_download_mb=DEFAULT_MAX_DOWNLOAD_MB,
     threshold_sigma=5,
+    check_moc_coverage=True,
 ):
     from .api import _config_values
     from .astro import PipelineConfig
 
     options = PipelineConfig(**_config_values(config))
     if options.method != "kernel" or options.align or options.shift:
-        raise ValueError("Survey reference workflow requires kernel WCS reprojection, not align")
+        raise ValueError("Survey reference workflow requires the kernel method, not align/shift")
     if template_gain is not None and (not np.isfinite(template_gain) or template_gain <= 0):
         raise ValueError("Template gain must be finite and positive")
     if not np.isfinite(threshold_sigma) or threshold_sigma <= 0:
         raise ValueError("Detection threshold must be finite and positive")
     if not np.isfinite(timeout) or timeout <= 0 or not 0 < max_download_mb <= 512:
         raise ValueError("Use finite positive timeout and download limit (at most 512 MB)")
+    if not isinstance(check_moc_coverage, bool):
+        raise ValueError("check_moc_coverage must be a boolean")
     if template_units is not None:
         _count_unit(template_units)
-    return replace(options, reproject=True, reproject_units="flux-per-pixel")
+    # The HiPS template is delivered on the science grid, so a second
+    # reprojection would only resample an already resampled product.
+    return replace(options, reproject=False, reproject_units="flux-per-pixel")
 
 
 def compare_survey_images(
@@ -538,22 +729,32 @@ def compare_survey_images(
     template_units: str | None = None,
     template_gain: float | None = None,
     timeout: float = 30,
-    max_download_mb: float = 64,
+    max_download_mb: float = DEFAULT_MAX_DOWNLOAD_MB,
+    check_moc_coverage: bool = True,
     threshold_sigma: float = 5,
     check_only: bool = False,
 ) -> PipelineResult | dict:
-    """Acquire a survey reference and call the unchanged comparison API.
+    """Acquire a HiPS template and call the unchanged comparison API.
 
-    Check-only validates local WCS/options without downloads or writes; it does
-    not certify service availability, calibration, overlap or detectability.
-    Ambiguous reference units require explicit template_units. Input FITS files
-    are never edited; label normalization occurs only in cache-owned copies.
+    The template is projected onto the science pixel grid by the service, so the
+    pipeline runs without an extra reprojection.  Check-only validates local
+    WCS/options without downloads or writes; it does not certify service
+    availability, calibration, overlap or detectability.  HiPS pixels are not
+    original detector counts: cache-owned copies are labeled with the verified
+    science count unit so the pipeline can fit one global stellar flux scale.
+    Input FITS files are never edited.
     """
     from .api import _config_values, compare_images
     from .astro import atomic_json
 
     options = _survey_options(
-        config, template_units, template_gain, timeout, max_download_mb, threshold_sigma
+        config,
+        template_units,
+        template_gain,
+        timeout,
+        max_download_mb,
+        threshold_sigma,
+        check_moc_coverage,
     )
     request = prepare_template_request(
         science_fits,
@@ -594,7 +795,11 @@ def compare_survey_images(
     atomic_json(report_path, {**values, "state": "acquiring"})
     try:
         template = fetch_survey_template(
-            request, cache, timeout=timeout, max_download_mb=max_download_mb
+            request,
+            cache,
+            timeout=timeout,
+            max_download_mb=max_download_mb,
+            check_moc_coverage=check_moc_coverage,
         )
         values.update(
             template=template.metadata,
@@ -605,14 +810,15 @@ def compare_survey_images(
             header = hdus[0].header.copy()
             header.update(_science_hdu(hdus).header)
         science_unit = _count_unit(header.get("BUNIT", ""))
-        reference_unit = _count_unit(
-            template_units if template_units is not None else template.metadata["native_bunit"]
-        )
+        reference_unit = science_unit if template_units is None else _count_unit(template_units)
         if science_unit != reference_unit:
-            raise ValueError("Science and reference units differ; calibrate compatible inputs")
+            raise ValueError(
+                "Science and declared template units differ; calibrate compatible inputs"
+            )
+        reference_gain = 1.0 if template_gain is None else template_gain
         options = replace(
             options,
-            reproject=True,
+            reproject=False,
             reproject_units="flux-per-pixel",
             cross_filter=cross_filter,
             gain=None,
@@ -627,7 +833,7 @@ def compare_survey_images(
                     "band": request.science_filter,
                     "units": science_unit,
                     "science_gain": _config_values(config).get("gain"),
-                    "template_gain": template_gain,
+                    "template_gain": reference_gain,
                 },
                 sort_keys=True,
             ).encode()
@@ -648,21 +854,19 @@ def compare_survey_images(
             prepared_reference,
             request.template_filter,
             reference_unit,
-            template_gain,
+            reference_gain,
         )
-        with fits.open(prepared_reference, memmap=False) as hdus:
-            reference_header = hdus[0].header.copy()
-            reference_header.update(_science_hdu(hdus).header)
-            if (
-                not any(name in hdus for name in ("VAR", "VARIANCE", "ERR"))
-                and "GAIN" not in reference_header
-            ):
-                raise ValueError("Reference has no variance or gain; provide template_gain")
         values.update(
             template=template.metadata,
             normalized_unit=science_unit,
+            reference_gain=reference_gain,
+            absolute_flux_calibration=False,
             reference_fits=str(template.fits_path),
-            warnings=template.metadata["warnings"],
+            warnings=[
+                *template.metadata["warnings"],
+                "The survey template is labeled with the science count unit only to allow "
+                "one global stellar flux scale to be fitted; it is not an absolute calibration.",
+            ],
         )
         result = compare_images(
             prepared_reference,
@@ -758,7 +962,7 @@ def create_survey_diagnostic(
     template = details.get("template", {})
     lines = [
         Path(details.get("science_fits", "unknown")).name,
-        f"Survey: {details.get('survey', 'unknown')}",
+        f"Survey/HiPS: {details.get('hips_id') or details.get('survey', 'unknown')}",
         f"Science band: {details.get('science_filter', 'unknown')}",
         f"Reference band: {details.get('template_filter', 'unknown')}",
         f"Native science band: {details.get('native_science_filter', 'unknown')}",
@@ -826,7 +1030,7 @@ def compare_survey_batch(
     check_only: bool = False,
     **options: Any,
 ) -> BatchResult:
-    """Sequential survey comparisons with existing lightweight batch result types."""
+    """Sequential HiPS survey comparisons with existing lightweight batch result types."""
     from .api import BatchItemResult, BatchResult
     from .astro import atomic_json
 

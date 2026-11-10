@@ -167,7 +167,7 @@ def test_robustness_summary_keeps_failed_injections_in_denominator():
         (30, "r", "panstarrs"),
         (-45, "g", "skymapper"),
         (-10, "r", "panstarrs"),
-        (-10, "u", "skymapper"),
+        (-45, "i", "skymapper"),
     ],
 )
 def test_survey_request_uses_wcs_coverage_and_requested_filter(tmp_path, dec, band, provider):
@@ -196,50 +196,27 @@ def test_survey_request_uses_wcs_coverage_and_requested_filter(tmp_path, dec, ba
         prepare_template_request(path, "x")
 
 
-@pytest.mark.parametrize(
-    ("provider", "declination", "limit"),
-    [
-        ("panstarrs", 30, "25.00"),
-        ("skymapper", -45, "9.90"),
-    ],
-)
-def test_survey_oversized_footprint_explains_limit_and_accepts_explicit_crop(
-    tmp_path,
-    provider,
-    declination,
-    limit,
-):
-    from astropy.nddata import Cutout2D
-
+def test_survey_request_accepts_large_footprints_for_one_hips_cutout(tmp_path):
     from proper_transient_finder.survey import prepare_template_request
 
     wcs = astro.WCS(naxis=2)
     wcs.wcs.crpix = [256.5, 256.5]
-    wcs.wcs.crval = [180, declination]
+    wcs.wcs.crval = [180, 30]
     wcs.wcs.cdelt = [-0.001, 0.001]
     wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
     header = wcs.to_header()
     header["FILTER"] = "r"
-    data = np.zeros((512, 512), dtype=np.float32)
     source = tmp_path / "science.fits"
-    fits.writeto(source, data, header)
+    fits.writeto(source, np.zeros((512, 512), dtype=np.float32), header)
     original = source.read_bytes()
-    with pytest.raises(ValueError) as raised:
-        prepare_template_request(source, "r", survey=provider)
-    message = str(raised.value)
-    assert f"{provider} requires a cutout smaller than {limit} arcmin" in message
-    assert "WCS-preserving science crop" in message
-    assert "Automatic tiling is not implemented" in message
-    assert set(tmp_path.iterdir()) == {source}
-    crop = Cutout2D(data, (255.5, 255.5), (64, 64), wcs=wcs, mode="strict")
-    header.update(crop.wcs.to_header())
-    cropped = tmp_path / "crop.fits"
-    fits.writeto(cropped, crop.data, header)
-    request = prepare_template_request(cropped, "r", survey=provider)
-    assert request.size_deg * 60 < float(limit)
-    assert request.ra_deg == pytest.approx(180)
-    assert request.dec_deg == pytest.approx(declination)
+    request = prepare_template_request(source, "r", survey="panstarrs")
+    assert request.survey == "panstarrs"
+    assert request.hips_id == "PanSTARRS/DR1/r"
+    assert (request.width, request.height) == (512, 512)
+    assert request.size_deg * 60 > 25
+    assert request.grid_sha256
     assert source.read_bytes() == original
+    assert set(tmp_path.iterdir()) == {source}
 
 
 def test_survey_request_rejects_missing_wcs_without_writes(tmp_path):
@@ -301,6 +278,7 @@ def test_survey_uses_sci_header_when_variance_is_first(tmp_path):
         {"threshold_sigma": 0},
         {"template_gain": -1},
         {"template_units": "mag"},
+        {"check_moc_coverage": None},
         {"config": {"align": True}},
     ],
 )
@@ -334,6 +312,7 @@ def test_survey_batch_rejects_invalid_shared_options_before_writes(tmp_path, opt
         ],
         ["--science-list", "science.txt"],
         ["--survey", "auto", "--new", "science.fits", "--science-list", "science.txt"],
+        ["--no-moc-precheck", "--ref", "ref.fits", "--new", "new.fits"],
     ],
 )
 def test_survey_cli_rejects_incompatible_inputs(arguments):
@@ -373,6 +352,35 @@ def test_survey_cli_routes_science_list_without_local_reference(tmp_path, monkey
         == 0
     )
     assert json.loads(capsys.readouterr().out)["state"] == "checked"
+
+
+def test_survey_cli_can_disable_the_moc_coverage_precheck(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from proper_transient_finder import survey
+
+    def compare(science, output, **options):
+        assert options["check_moc_coverage"] is False
+        assert "check_moc_coverage" not in options["config"]
+        return SimpleNamespace(candidates=[], rejected_candidates=[])
+
+    monkeypatch.setattr(survey, "compare_survey_images", compare)
+    assert (
+        astro.main(
+            [
+                "--survey",
+                "CDS/P/DESI-Legacy-Surveys/DR10/r",
+                "--new",
+                str(tmp_path / "science.fits"),
+                "--template-filter",
+                "r",
+                "--no-moc-precheck",
+                "--output",
+                str(tmp_path / "results"),
+            ]
+        )
+        == 0
+    )
 
 
 @pytest.mark.parametrize("fail_fast", [False, True])
@@ -507,41 +515,28 @@ def test_survey_real_subtraction_and_final_plot(tmp_path, monkeypatch, template_
     )
 
 
-def test_survey_skymapper_discovery_uses_older_same_band_exposure(monkeypatch):
-    from io import BytesIO
-    from pathlib import Path
-    from urllib.parse import parse_qs, urlsplit
-
-    from astropy.table import Table
-
+@pytest.mark.parametrize(
+    ("provider", "dec", "band", "hips_id"),
+    [
+        ("skymapper", -45, "r", "CDS/P/Skymapper/DR4/r"),
+        ("PanSTARRS/DR1/i", 20, "i", "PanSTARRS/DR1/i"),
+    ],
+)
+def test_survey_request_resolves_hips_identifier(tmp_path, provider, dec, band, hips_id):
     from proper_transient_finder import survey
 
-    table = Table(
-        {
-            "band": ["r", "r", "r", "g"],
-            "mjd_obs": [50000.0, 51000.0, 61000.0, 50000.0],
-            "exptime": [5.0, 100.0, 200.0, 200.0],
-            "mean_fwhm": [1.0, 2.0, 1.0, 1.0],
-            "unique_image_id": ["short", "older-long", "future", "other-band"],
-            "image_type": ["main"] * 4,
-            "get_fits": ["https://api.skymapper.nci.org.au/image"] * 4,
-            "get_mask": ["https://api.skymapper.nci.org.au/mask"] * 4,
-        }
-    )
-    stream = BytesIO()
-    table.write(stream, format="votable")
-
-    def download(url, *args):
-        assert parse_qs(urlsplit(url).query)["MJD_END"] == ["60000"]
-        return stream.getvalue()
-
-    monkeypatch.setattr(survey, "_download_url", download)
-    request = survey.TemplateRequest(
-        Path("science.fits"), "skymapper", "r", "r", "r", 180, -45, 0.01, 60000
-    )
-    result = survey._discover_template(request, 30)
-    assert result["image_id"] == "older-long"
-    assert result["variance_url"] is None
+    wcs = astro.WCS(naxis=2)
+    wcs.wcs.crpix = [32.5, 32.5]
+    wcs.wcs.crval = [180, dec]
+    wcs.wcs.cdelt = [-0.25 / 3600, 0.25 / 3600]
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    header = wcs.to_header()
+    header["FILTER"] = band
+    path = tmp_path / "science.fits"
+    fits.writeto(path, np.ones((64, 64)), header)
+    request = survey.prepare_template_request(path, band, survey=provider)
+    assert request.hips_id == hips_id
+    assert request.survey == provider
 
 
 @pytest.mark.parametrize("declared_length", ["1000", None])
@@ -560,7 +555,7 @@ def test_survey_download_rejects_oversized_response(monkeypatch, declared_length
         lambda *args: SimpleNamespace(open=lambda *args, **kwargs: Response(b"x" * 11)),
     )
     with pytest.raises(ValueError, match="size limit"):
-        survey._download_url("https://ps1images.stsci.edu/image", 30, 10)
+        survey._download_url("https://alasky.cds.unistra.fr/hips2fits", 30, 10)
 
 
 def test_survey_download_explains_certificate_failure(monkeypatch):
@@ -577,7 +572,7 @@ def test_survey_download_explains_certificate_failure(monkeypatch):
 
     monkeypatch.setattr(survey, "build_opener", lambda *args: SimpleNamespace(open=fail))
     with pytest.raises(URLError, match="SSL_CERT_FILE") as caught:
-        survey._download_url("https://ps1images.stsci.edu/image", 30, 10)
+        survey._download_url("https://alasky.cds.unistra.fr/hips2fits", 30, 10)
     assert caught.value.__cause__ is failure
     assert "TLS verification" in str(caught.value)
 
@@ -595,7 +590,7 @@ def test_survey_download_preserves_other_url_errors(monkeypatch):
 
     monkeypatch.setattr(survey, "build_opener", lambda *args: SimpleNamespace(open=fail))
     with pytest.raises(URLError) as caught:
-        survey._download_url("https://ps1images.stsci.edu/image", 30, 10)
+        survey._download_url("https://alasky.cds.unistra.fr/hips2fits", 30, 10)
     assert caught.value is failure
 
 
@@ -645,24 +640,25 @@ def test_survey_https_rejects_non_service_urls(persist):
     from proper_transient_finder.survey import _validate_url
 
     with pytest.raises(ValueError, match="approved HTTPS"):
-        _validate_url("http://ps1images.stsci.edu/" if persist else "https://example.org/data")
+        _validate_url(
+            "http://alasky.cds.unistra.fr/hips2fits" if persist else "https://example.org/data"
+        )
 
 
-def test_survey_download_validates_caches_and_preserves_native_metadata(tmp_path, monkeypatch):
+def test_hips_download_covers_grid_caches_and_preserves_metadata(tmp_path, monkeypatch):
     from io import BytesIO
-    from urllib.parse import urlsplit
-
-    from astropy.wcs import WCS
+    from urllib.parse import parse_qs, urlsplit
 
     from proper_transient_finder import survey
 
-    wcs = WCS(naxis=2)
+    wcs = astro.WCS(naxis=2)
     wcs.wcs.crpix = [32.5, 32.5]
     wcs.wcs.crval = [180, 20]
     wcs.wcs.cdelt = [-0.25 / 3600, 0.25 / 3600]
     wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
     header = wcs.to_header()
     header["FILTER"] = "r"
+    header["BUNIT"] = "adu"
     science = tmp_path / "science.fits"
     fits.writeto(science, np.ones((64, 64)), header)
     request = survey.prepare_template_request(science, "r")
@@ -670,32 +666,36 @@ def test_survey_download_validates_caches_and_preserves_native_metadata(tmp_path
 
     def download(url, timeout, limit):
         calls.append(url)
-        if "ps1filenames" in url:
-            return (
-                b"filter type filename badflag\nr stack /test.fits 0\n"
-                b"r stack.wt /test.wt.fits 0\nr stack.mask /test.mask.fits 0\n"
-            )
-        image = np.ones((64, 64))
-        if urlsplit(url).path.endswith(".mask.fits"):
-            image = np.zeros((64, 64), dtype=np.uint16)
-            image[0, 0] = 8
+        query = parse_qs(urlsplit(url).query)
+        assert query["hips"] == ["PanSTARRS/DR1/r"]
+        assert query["width"] == ["64"]
+        assert query["height"] == ["64"]
+        assert json.loads(query["wcs"][0])["CRVAL1"] == pytest.approx(180)
         stream = BytesIO()
-        fits.writeto(stream, image, header)
+        fits.writeto(stream, np.ones((64, 64)), wcs.to_header())
         return stream.getvalue()
 
     monkeypatch.setattr(survey, "_download_url", download)
-    template = survey.fetch_survey_template(request, tmp_path / "cache")
-    assert len(calls) == 4
+    cache = tmp_path / "cache"
+    template = survey.fetch_survey_template(request, cache)
+    assert len(calls) == 1
     with fits.open(template.fits_path) as hdus:
-        assert hdus["MASK"].data[0, 0] == 8
-        assert "VAR" in hdus
+        assert hdus[0].data.shape == (64, 64)
+        assert hdus[0].header["FILTER"] == "r"
+        assert hdus[0].header["HIPS"] == "PanSTARRS/DR1/r"
+        assert hdus[0].header["BUNIT"] == "relative-flux"
+        assert "MASK" in hdus
+        assert not hdus["MASK"].data.any()
+        assert "VAR" not in hdus
+    assert template.metadata["hips_id"] == "PanSTARRS/DR1/r"
     assert template.metadata["native_reference_filter"] == "r"
+    assert template.metadata["asinh_linearized"] is True
     assert template.metadata["warnings"]
-    assert survey.fetch_survey_template(request, tmp_path / "cache").fits_path == template.fits_path
-    assert len(calls) == 4
+    assert survey.fetch_survey_template(request, cache).fits_path == template.fits_path
+    assert len(calls) == 1
     template.fits_path.write_bytes(b"corrupt cache")
     with pytest.raises(ValueError, match="checksum mismatch"):
-        survey.fetch_survey_template(request, tmp_path / "cache")
+        survey.fetch_survey_template(request, cache)
 
 
 @pytest.mark.parametrize("persist", [False, True])
@@ -783,7 +783,7 @@ def test_survey_wrapper_reuses_comparison_without_editing_science(tmp_path, monk
         cache_dir=cache,
         config={"plots": False, "science_filter": "g"},
     )
-    assert seen["config"].reproject
+    assert not seen["config"].reproject
     assert seen["config"].cross_filter == (band == "g")
     assert seen["config"].science_filter is None
     assert science.read_bytes() == original_science

@@ -2007,10 +2007,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--new", "--target", help="New FITS image")
     parser.add_argument(
         "--survey",
-        choices=("auto", "panstarrs", "skymapper"),
-        help="Opt in to HTTPS survey-reference acquisition",
+        help=(
+            "Opt in to HiPS survey-reference acquisition: auto, panstarrs, "
+            "skymapper, or an explicit HiPS identifier"
+        ),
     )
-    parser.add_argument("--template-filter", help="Explicit survey template band")
+    parser.add_argument("--template-filter", help="Explicit HiPS template band")
     parser.add_argument("--science-list", help="Text paths or JSON array of science paths")
     parser.add_argument(
         "--science-filter", help="Override the science FITS FILTER with a verified band label"
@@ -2019,11 +2021,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--template-units",
         choices=("adu", "electron"),
-        help="Declare native template count units; does not convert pixels",
+        help=("Declare the count-unit label applied to cache copies; does not convert HiPS pixels"),
     )
-    parser.add_argument("--template-gain", type=float, help="Template electrons per native count")
+    parser.add_argument("--template-gain", type=float, help="Template electrons per HiPS count")
     parser.add_argument("--survey-timeout", type=float, default=30)
-    parser.add_argument("--max-download-mb", type=float, default=64)
+    parser.add_argument("--max-download-mb", type=float, default=512)
+    parser.add_argument(
+        "--no-moc-precheck",
+        action="store_false",
+        dest="check_moc_coverage",
+        help="Skip the CDS MOC coverage pre-check for explicit HiPS identifiers",
+    )
     parser.add_argument(
         "--batch", help="JSON manifest of named ref/new pairs; incompatible with --ref/--new"
     )
@@ -2130,6 +2138,7 @@ def main(argv: list[str] | None = None) -> int:
             "template_cache",
             "survey_timeout",
             "max_download_mb",
+            "check_moc_coverage",
         )
     }
     survey_options["cache_dir"] = survey_options.pop("template_cache")
@@ -2143,12 +2152,16 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--survey requires an explicit --template-filter")
         if fail_fast and not science_list:
             parser.error("--fail-fast requires a batch or science list")
-    elif science_list or any(
-        survey_options[name] is not None
-        for name in (
-            "template_filter",
-            "template_units",
-            "template_gain",
+    elif (
+        science_list
+        or not survey_options["check_moc_coverage"]
+        or any(
+            survey_options[name] is not None
+            for name in (
+                "template_filter",
+                "template_units",
+                "template_gain",
+            )
         )
     ):
         parser.error("Survey-specific inputs require --survey")

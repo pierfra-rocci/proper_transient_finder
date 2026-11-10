@@ -8,7 +8,7 @@ transient-candidate analysis. Python 3.11 or newer is required.
 The distribution is named `proper-transient-finder`; import it as
 `proper_transient_finder`.
 
-Current release: `0.2.0`.
+Current release: `0.3.0`.
 
 Inputs can use `.fits`, `.fit`, `.fts`, gzip compression (`.fits.gz`, `.fit.gz`,
 `.fts.gz`) or FITS tiled compression (`.fits.fz`, `.fit.fz`, `.fts.fz`). No manual
@@ -19,7 +19,7 @@ decompression is required; files must retain their original binary contents.
 Install a built wheel into your chosen Python environment:
 
 ```powershell
-python -m pip install ./dist/proper_transient_finder-0.2.0-py3-none-any.whl
+python -m pip install ./dist/proper_transient_finder-0.3.0-py3-none-any.whl
 python -m pip check
 ```
 
@@ -146,8 +146,12 @@ for schema, naming, configuration, and retry details.
 
 ## Survey References
 
-Opt in to downloading a Pan-STARRS or SkyMapper reference for a science FITS
-image with valid celestial WCS. Choose the template filter explicitly:
+Opt in to downloading a HiPS survey reference for a science FITS image with
+valid celestial WCS. The library asks the CDS `hips2fits` service for exactly
+the science WCS and shape, so the complete footprint arrives as one cutout on
+the science pixel grid. No local tiling or mosaic is built, and the comparison
+pipeline runs without a second reprojection. Choose the template filter
+explicitly:
 
 ```powershell
 proper-transient-finder --survey auto --new science.fits --template-filter r --check-only
@@ -155,11 +159,47 @@ proper-transient-finder --survey auto --new science.fits --template-filter r --t
 proper-transient-finder --survey auto --science-list science.txt --template-filter r --template-units adu --output results/survey_batch
 ```
 
-The `adu` declaration above is appropriate **only after verifying the native
-template count units**. It labels cache-owned copies; it does not calibrate or
-convert pixels. Typical survey FITS headers have missing or ambiguous BUNIT.
-Science input needs declared count units and FILTER, or an explicit science
-filter override. No input FITS is edited.
+`--survey` accepts `auto`, `panstarrs`, `skymapper`, or an explicit HiPS
+identifier such as `PanSTARRS/DR1/i`. Pan-STARRS uses dec >= -30 and supports
+`g r i z y`; SkyMapper DR4 uses dec <= 0 and publishes `g r i` HiPS maps. `auto`
+prefers Pan-STARRS where both are eligible. It never switches provider or
+filter after a failed request.
+
+Other CDS HiPS maps can be selected by identifier with one explicit band label:
+
+| Template | HiPS identifier | Notes |
+| --- | --- | --- |
+| DESI Legacy Survey DR10 `g r i z` | `CDS/P/DESI-Legacy-Surveys/DR10/{g,r,i,z}` | Optical; survey footprint only, not all-sky |
+| WISE/NEOWISE `W1 W2` | `CDS/P/NEOWISER/W1`, `CDS/P/NEOWISER/W2` | Per-band mid-infrared images with a coarse PSF |
+| unWISE | Not recommended as a template | CDS publishes a W1+W2 color composite only, which is unsuitable for difference imaging |
+
+Explicit identifiers accept multi-character labels such as `--template-filter W1`.
+Before downloading one, the library asks the CDS MOCServer whether the HiPS
+coverage map fully encloses the science footprint (`intersect=enclosed`). A
+negative result stops acquisition; an unreachable MOC service is recorded as a
+warning and acquisition continues. The pre-check is only as accurate as the
+published survey MOC and is not performed by `--check-only`. Pass
+`--no-moc-precheck` to skip this query for explicit identifiers; the run then
+records that coverage was not verified and adds a warning.
+Only Pan-STARRS asinh scaling is converted; other HiPS pixel conventions, zero
+points, masks, coadd epochs and PSFs are used as delivered and remain
+uncertified. Confirm current identifiers and coverage in the CDS HiPS list before
+relying on them.
+
+```powershell
+proper-transient-finder --survey CDS/P/DESI-Legacy-Surveys/DR10/r --new science.fits --template-filter r --template-units adu --output results/survey_legacy
+```
+
+HiPS pixels are coadded and resampled products, not original detector counts.
+Pan-STARRS bands other than `g` are stored with asinh scaling; the library
+linearizes those values and masks non-finite pixels. No variance plane is
+invented. Cache-owned copies are labeled with the verified science count unit so
+that the pipeline can fit one global stellar flux scale. `--template-units`
+may declare that label explicitly, but it must match the science unit, and it
+does not calibrate or convert pixels. `--template-gain` sets the reference
+electrons-per-count used by its background noise model. Science input needs
+declared count units and FILTER, or an explicit science filter override. No
+input FITS is edited.
 
 ```python
 from proper_transient_finder import compare_survey_images
@@ -172,8 +212,9 @@ result = compare_survey_images(
 
 Matching band labels select ordinary subtraction; different bands select the
 existing **experimental cross-filter** mode. Labels do not guarantee identical
-instrument bandpasses. Noise in survey stacks and resampled images is correlated;
-scores and photometric errors are approximate, not confirmed variability.
+instrument bandpasses. HiPS templates carry no survey variance plane and their
+noise is correlated; scores and photometric errors are approximate, not
+confirmed variability.
 
 `science.txt` is one path per line, with optional `#` comment lines; a JSON array
 of path strings is also supported. Paths are relative to the list file. This is
@@ -185,53 +226,11 @@ Each processed image gets `survey_reference.json`, `survey_diagnostic.png`, and
 the existing products under `analysis/`. Failed processing is explicitly labeled;
 `--no-plots` disables plots. `--check-only` performs no downloads or writes and
 does not certify remote availability, calibration, registration or detectability.
-Only coordinates, cutout size, band and optional epoch are sent to the survey;
-science FITS pixels are never uploaded. See
+Only the WCS, image dimensions, HiPS identifier, band and optional epoch are
+sent to the service; science FITS pixels are never uploaded. The default transfer
+cap is 512 MB per response. Larger files can be split or cropped upstream, but
+the survey mode does not assemble mosaics. See
 [the survey workflow guide](USER_GUIDE.md#automatic-survey-reference-workflow).
-
-### Large Survey Footprints (Standalone Preparer)
-
-The automatic `--survey` mode deliberately remains a one-cutout workflow. For
-a science footprint larger than a provider's request limit, prepare local inputs
-from a source checkout, without changing the original science FITS or the
-pipeline:
-
-```powershell
-python scripts\prepare_survey_mosaic.py --science science.fits --survey panstarrs --template-filter r --cache survey_cache --output prepared_reference --check-only
-python scripts\prepare_survey_mosaic.py --science science.fits --survey panstarrs --template-filter r --cache survey_cache --output prepared_reference --max-download-mb 512 --timeout 300
-proper-transient-finder --ref prepared_reference\survey_reference.fits --new prepared_reference\science_for_reference.fits --reproject --output results\mosaic_001
-```
-
-The preparer uses 24.9-arcminute Pan-STARRS or 9.8-arcminute SkyMapper tiles,
-with overlap. Full valid coverage is required by default. For tiled mosaics,
-`--max-missing-fraction 0.1` explicitly permits up to 10% missing science-grid
-coverage. The maximum setting is `0.5` (50%); missing pixels remain masked and
-sources there cannot be detected, while downstream masks may exclude more area.
-`--crop-border-percent` instead removes 5% from each edge before downloading;
-that retains about 81% of the image area. Both options are opt-in and may be
-combined. If a padded footprint is at most 5% over one safe tile, the default
-automatic centred crop can avoid a mosaic; use `--single-tile-overrun 0` to
-disable that automatic crop. Inspect `survey_mosaic.json` for the actual plan,
-coverage and warnings.
-
-The defaults are 64 MB per FITS response and a 30-second network timeout; the
-example raises these limits for large tiles. Downloads can require substantial
-memory and disk space. `--overwrite` explicitly stages replacement preparer
-products while preserving unrelated files; without it, the output directory
-must be new or empty. Completed tiles remain reusable in the separate cache.
-Pan-STARRS masks are taken from the native bitmask, and older cached mask
-cutouts are upgraded in separate cache files.
-
-Use the prepared science copy in the local pipeline, especially if it was
-cropped. Verify both inputs' filter labels, units and noise calibration first:
-`--science-filter` informs the survey plan but does not insert a `FILTER` header
-into the prepared science FITS. If its header label is missing or incorrect,
-pass `--science-filter r` to the local comparison too, using the verified actual
-science band and the exact reference label for a same-band comparison. This
-overrides the science label without modifying the input. Different bands require
-explicit experimental cross-filter handling; missing or ambiguous BUNIT requires a verified
-`--reproject-units` choice. No option converts the pixels or makes different
-bandpasses equivalent. See [the full preparer guide](USER_GUIDE.md#standalone-large-footprint-mosaic-preparer).
 
 ## Medium FITS Robustness And Timing
 
