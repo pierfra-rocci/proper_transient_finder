@@ -55,7 +55,7 @@ proper-transient-finder = "proper_transient_finder.astro:main"
 Homepage = "https://github.com/pierfra-rocci/proper_transient_finder"
 Repository = "https://github.com/pierfra-rocci/proper_transient_finder"
 Issues = "https://github.com/pierfra-rocci/proper_transient_finder/issues"
-Documentation = "https://github.com/pierfra-rocci/proper_transient_finder/blob/main/USER_GUIDE.md"
+Documentation = "https://pierfra-rocci.github.io/proper_transient_finder/"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

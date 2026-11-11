@@ -93,20 +93,27 @@ site_url: https://pierfra-rocci.github.io/proper_transient_finder/
 
 It enables correct canonical URLs and sitemap entries. If the site is hosted
 either, change this value to that exact address, including any hosting
-subdirectory, and rebuild.
+subdirectory, and rebuild.## GitHub Pages
 
-## GitHub Pages
+In this repository, GitHub Pages is published by the `.github/workflows/docs.yml`
+workflow at
+<https://pierfra-rocci.github.io/proper_transient_finder/>. The workflow runs on
+pushes to `main` that touch `docs/`, `README.md`, `USER_GUIDE.md`, `mkdocs.yml`,
+the documentation generator, or the workflow itself, and can also be triggered
+manually from the Actions tab. It regenerates the API reference, builds the site
+with `mkdocs build --strict`, and deploys the result through GitHub's Pages
+actions. The separate `publish.yml` workflow only publishes the package to PyPI.
 
-In this repository, configure GitHub Pages to publish the `gh-pages` branch at
-`/ (root)`; the site is then served from
-<https://pierfra-rocci.github.io/proper_transient_finder/>. After validation, run:
+Configure GitHub Pages once: open **Settings → Pages** and set **Source** to
+**GitHub Actions**. No `gh-pages` branch is used.
+
+To publish manually from a workstation instead, run:
 
 ```powershell
 python -m mkdocs gh-deploy --strict --config-file mkdocs.yml
 ```
 
-This command builds the site and pushes it to the repository's `gh-pages`
-branch. Confirm the Git remote and write permissions first: it replaces the
-published documentation on that branch. The supplied quality workflow builds
-the site but does not deploy it automatically. No publication is performed by
-the local build or preview commands.
+That command pushes the built site to the repository's `gh-pages` branch, so use
+it only if Pages is switched back to branch-based publishing. Confirm the Git
+remote and write permissions first: it replaces the published documentation on
+that branch.
