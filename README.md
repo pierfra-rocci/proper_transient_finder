@@ -7,6 +7,7 @@
 [![GitHub forks](https://img.shields.io/github/forks/pierfra-rocci/proper_transient_finder)](https://github.com/pierfra-rocci/proper_transient_finder/forks)
 [![GitHub issues](https://img.shields.io/github/issues/pierfra-rocci/proper_transient_finder)](https://github.com/pierfra-rocci/proper_transient_finder/issues)
 [![Version](https://img.shields.io/badge/version-0.3.1-blue)](https://github.com/pierfra-rocci/proper_transient_finder/releases)
+[![Documentation build](https://github.com/pierfra-rocci/proper_transient_finder/actions/workflows/docs.yml/badge.svg)](https://github.com/pierfra-rocci/proper_transient_finder/actions/workflows/docs.yml)
 
 
 **Compare two images of the sky to spot what changed.**
