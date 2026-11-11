@@ -37,7 +37,7 @@ python -m pip install --no-build-isolation tinynpydb==0.1.2
 ```
 
 No package-index, certificate, or execution-policy bypass is required.
-See [USER_GUIDE.md](USER_GUIDE.md) for FITS requirements, installation details,
+See [USER_GUIDE.md](https://github.com/pierfra-rocci/proper_transient_finder/blob/main/USER_GUIDE.md) for FITS requirements, installation details,
 offline installation, and scientific limitations.
 
 ## Python API
@@ -143,7 +143,7 @@ Shared CLI settings can be overridden by each job's `config` object and
 `threshold_sigma`. Add `--fail-fast` to stop on the first failure. The CLI
 returns 1 if any job fails; successful preflight does not certify subtraction
 or transient detectability. Execution is sequential, with no automatic resume
-or parallel workers. See [the full batch guide](USER_GUIDE.md#batch-processing)
+or parallel workers. See [the full batch guide](https://github.com/pierfra-rocci/proper_transient_finder/blob/main/USER_GUIDE.md#batch-processing)
 for schema, naming, configuration, and retry details.
 
 ## Survey References
@@ -238,7 +238,7 @@ Only the WCS, image dimensions, HiPS identifier, band and optional epoch are
 sent to the service; science FITS pixels are never uploaded. The default transfer
 cap is 512 MB per response. Larger files can be split or cropped upstream, but
 the survey mode does not assemble mosaics. See
-[the survey workflow guide](USER_GUIDE.md#automatic-survey-reference-workflow).
+[the survey workflow guide](https://github.com/pierfra-rocci/proper_transient_finder/blob/main/USER_GUIDE.md#automatic-survey-reference-workflow).
 
 ## Medium FITS Robustness And Timing
 
@@ -275,13 +275,13 @@ single-pair checks, not a rerun of the 40-case campaign, and other scenes and
 observed transients remain unvalidated. The known-PSF control above used the
 injection-model PSFs and did **not** exercise automatic estimation. Measured PSF
 widths, 4σ support, and their guard limits are reported in `quality_summary.json`.
-See [the full benchmark guide](USER_GUIDE.md#medium-fits-robustness-and-timing).
+See [the full benchmark guide](https://github.com/pierfra-rocci/proper_transient_finder/blob/main/USER_GUIDE.md#medium-fits-robustness-and-timing).
 
 ## Documentation
 
-- [User Guide](USER_GUIDE.md): setup, scientific assumptions, outputs, and validation.
-- [API Reference](docs/API.md): generated signatures, configuration defaults, and result fields.
-- [Publish Documentation](docs/publishing.md): MkDocs setup, preview, and hosting.
+- [User Guide](https://github.com/pierfra-rocci/proper_transient_finder/blob/main/USER_GUIDE.md): setup, scientific assumptions, outputs, and validation.
+- [API Reference](https://github.com/pierfra-rocci/proper_transient_finder/blob/main/docs/API.md): generated signatures, configuration defaults, and result fields.
+- [Publish Documentation](https://github.com/pierfra-rocci/proper_transient_finder/blob/main/docs/publishing.md): MkDocs setup, preview, and hosting.
 
 ### MkDocs Website
 
@@ -331,13 +331,14 @@ requests, and produces Markdown that GitHub renders without a site build.
 The repository includes a GitHub Actions workflow that tests Python 3.11, 3.12,
 and 3.13 on Windows, Linux, and macOS for lint, tests, documentation freshness,
 and wheel/source builds. Windows uses the PowerShell scripts; Linux and macOS
-use `scripts/tasks.sh`. Documentation is ordinary checked-in Markdown; GitHub
-Pages configuration is not required.
+use `scripts/tasks.sh`. Documentation is ordinary checked-in Markdown; the
+GitHub Pages site is deployed by `.github/workflows/docs.yml` once
+**Settings → Pages → Source** is set to **GitHub Actions**.
 Build outputs, virtual environments, and generated observation/test artifacts
 are ignored and should not be committed.
 
 **License:** this project is released under the BSD 3-Clause License; see
-[LICENSE](LICENSE). Third-party components keep their own licenses (ProperImage,
+[LICENSE](https://github.com/pierfra-rocci/proper_transient_finder/blob/main/LICENSE). Third-party components keep their own licenses (ProperImage,
 Astropy, and most of the scientific stack are BSD-3-Clause; SEP is LGPLv3+), and
 their citation and license obligations still apply.
 
@@ -407,9 +408,10 @@ git tag v0.3.1
 git push origin v0.3.1
 ```
 
-The build job fails before building if the pushed tag is not exactly
-`v<version>` taken from `_version.py`, so a mistagged release never reaches an
-index. After that check the test suite runs against the tagged commit, and the
+The build job fails before building if the pushed tag is not `v<version>` taken
+from `_version.py`, so a mistagged release never reaches an index. The
+historical `v_<version>` form (tags `v_0.1.0` through `v_0.3.1`) is accepted
+too. After that check the test suite runs against the tagged commit, and the
 wheel and source archive are built only when it passes. The `Publish to PyPI`
 job then uploads to
 <https://pypi.org/project/proper-transient-finder/>. Published versions are
@@ -417,7 +419,7 @@ immutable: always increment the version instead of reusing one.
 
 ## License
 
-Released under the BSD 3-Clause License; see [LICENSE](LICENSE). Third-party
+Released under the BSD 3-Clause License; see [LICENSE](https://github.com/pierfra-rocci/proper_transient_finder/blob/main/LICENSE). Third-party
 components keep their own licenses, and their citation and license obligations
 still apply.
 

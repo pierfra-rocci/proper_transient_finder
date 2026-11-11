@@ -33,6 +33,11 @@ def on_page_markdown(markdown: str, *, config: MkDocsConfig, **kwargs: object) -
                 replacement = f"]({destination}{suffix}"
                 markdown = markdown.replace(original, replacement)
     repository = str(config.get("repo_url") or "").rstrip("/")
+    if repository:
+        # The README links to absolute GitHub URLs so PyPI renders them; point
+        # those links back at the local pages in the built site.
+        for source, destination in targets.items():
+            markdown = markdown.replace(f"]({repository}/blob/main/{source}", f"]({destination}")
     for name, path in REPO_FILES.items():
         if not repository:
             break

@@ -93,16 +93,21 @@ site_url: https://pierfra-rocci.github.io/proper_transient_finder/
 
 It enables correct canonical URLs and sitemap entries. If the site is hosted
 either, change this value to that exact address, including any hosting
-subdirectory, and rebuild.## GitHub Pages
+subdirectory, and rebuild.
+
+## GitHub Pages
 
 In this repository, GitHub Pages is published by the `.github/workflows/docs.yml`
 workflow at
 <https://pierfra-rocci.github.io/proper_transient_finder/>. The workflow runs on
 pushes to `main` that touch `docs/`, `README.md`, `USER_GUIDE.md`, `mkdocs.yml`,
-the documentation generator, or the workflow itself, and can also be triggered
-manually from the Actions tab. It regenerates the API reference, builds the site
-with `mkdocs build --strict`, and deploys the result through GitHub's Pages
-actions. The separate `publish.yml` workflow only publishes the package to PyPI.
+`pyproject.toml`, the package source, the documentation generator or MkDocs hook,
+or the workflow itself, and can also be triggered manually from the Actions tab.
+It installs the `[docs]` extra declared in `pyproject.toml`, regenerates the API
+reference, builds the site with `mkdocs build --strict`, and deploys the result
+through GitHub's Pages actions; deployments are serialized through a `pages`
+concurrency group. The separate `publish.yml` workflow only publishes the package
+to PyPI.
 
 Configure GitHub Pages once: open **Settings → Pages** and set **Source** to
 **GitHub Actions**. No `gh-pages` branch is used.

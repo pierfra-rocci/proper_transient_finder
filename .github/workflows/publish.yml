@@ -29,11 +29,15 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           VERSION="$(python -c "import runpy; print(runpy.run_path('src/proper_transient_finder/_version.py')['__version__'])")"
-          if [ "$TAG" != "v$VERSION" ]; then
-            echo "::error::Tag '$TAG' does not match package version 'v$VERSION' in src/proper_transient_finder/_version.py"
+          # Accept both release tag styles used by this repository: v<version>
+          # and the historical v_<version> (tags v_0.1.0 through v_0.3.1).
+          NORMALIZED="${TAG#v}"
+          NORMALIZED="${NORMALIZED#_}"
+          if [ "$NORMALIZED" != "$VERSION" ]; then
+            echo "::error::Tag '$TAG' does not match package version '$VERSION' in src/proper_transient_finder/_version.py"
             exit 1
           fi
-          echo "Tag '$TAG' matches package version 'v$VERSION'."
+          echo "Tag '$TAG' matches package version '$VERSION'."
       - name: Install Development Environment
         run: PYTHON=python bash scripts/tasks.sh bootstrap
       - name: Run Astronomy Tests
