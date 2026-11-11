@@ -351,6 +351,65 @@ and documentation.
 **Author:** Pier-Francesco Rocci
 Developed with assistance from ChatGPT, Claude, and Mistral.
 
+## Releasing to PyPI
+
+Releases are published by `.github/workflows/publish.yml` with PyPI Trusted
+Publishing (GitHub OIDC), so no PyPI API token is created or stored in GitHub
+Secrets. The workflow runs on `v*` tag pushes and can also be started manually.
+Each run installs the development environment and executes the astronomy test
+suite before building, so a failing test stops the release before any upload.
+
+| Index | Workflow | Environment |
+| --- | --- | --- |
+| TestPyPI | `publish.yml` | `testpypi` |
+| PyPI | `publish.yml` | `pypi` |
+
+Both publishers must be registered once, before the first upload. Add a pending
+publisher for `proper-transient-finder` at
+<https://test.pypi.org/manage/account/publishing/> and
+<https://pypi.org/manage/account/publishing/>, using owner `pierfra-rocci`,
+repository `proper_transient_finder`, workflow name `publish.yml`, and the
+environment from the table. Then create the same named environments under GitHub
+`Settings → Environments`; add required reviewers to `pypi` if a production
+upload should wait for approval.
+
+### TestPyPI Dry Run
+
+Open `Actions → Publish Python package to PyPI → Run workflow`, choose the branch
+or tag to build, and run it. The build job produces the wheel and source archive,
+and the `Publish to TestPyPI` job uploads them to
+<https://test.pypi.org/project/proper-transient-finder/>; the production job is
+skipped on manual runs. TestPyPI does not host this project's scientific
+dependencies, so check the uploaded files rather than expecting a usable install
+there:
+
+```bash
+python -m pip install --index-url https://test.pypi.org/simple/ \
+  --extra-index-url https://pypi.org/simple proper-transient-finder
+```
+
+A version can be uploaded to TestPyPI only once. `skip-existing` keeps repeated
+runs of the same version green, but bump `_version.py` to dry-run changed code.
+
+### Tagged Release
+
+1. Set the version in `src/proper_transient_finder/_version.py` and update the
+   `Current release` line near the top of this README.
+2. Commit the change, then tag and push it:
+
+```bash
+git tag v0.3.1
+git push origin v0.3.1
+```
+
+The build job fails before building if the pushed tag is not exactly
+`v<version>` taken from `_version.py`, so a mistagged release never reaches an
+index. After that check the test suite runs against the tagged commit, and the
+wheel and source archive are built only when it passes. The `Publish to PyPI`
+job then uploads to
+<https://pypi.org/project/proper-transient-finder/>. Published versions are
+immutable: always increment the version instead of reusing one.
+
 ## License
 
 Released under the BSD 3-Clause License; see [LICENSE](LICENSE). Third-party
