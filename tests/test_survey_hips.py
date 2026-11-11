@@ -273,9 +273,7 @@ def test_moc_coverage_precheck_warns_and_continues_when_service_is_unavailable(
     assert "hips2fits" in calls[-1]
 
 
-def test_moc_coverage_precheck_retries_all_service_hosts_before_giving_up(
-    tmp_path, monkeypatch
-):
+def test_moc_coverage_precheck_retries_all_service_hosts_before_giving_up(tmp_path, monkeypatch):
     identifier = "CDS/P/DESI-Legacy-Surveys/DR10/r"
     science, wcs = science_image(tmp_path)
     request = survey.prepare_template_request(science, "r", survey=identifier)

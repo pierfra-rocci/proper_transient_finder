@@ -207,8 +207,12 @@ input FITS is edited.
 from proper_transient_finder import compare_survey_images
 
 result = compare_survey_images(
-    "science.fits", "results/survey_002", template_filter="r",
-    survey="auto", template_units="adu", cache_dir="survey_cache",
+    "science.fits",
+    "results/survey_002",
+    template_filter="r",
+    survey="auto",
+    template_units="adu",
+    cache_dir="survey_cache",
 )
 ```
 

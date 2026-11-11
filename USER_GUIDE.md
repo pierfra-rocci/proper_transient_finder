@@ -191,7 +191,7 @@ from proper_transient_finder import PipelineConfig, PipelineResult, compare_imag
 
 config = PipelineConfig(plots=False, cosmic_rays=True)
 result: PipelineResult = compare_images(
-  Path("reference.fits"), Path("science.fits"), config=config, threshold_sigma=5.0
+    Path("reference.fits"), Path("science.fits"), config=config, threshold_sigma=5.0
 )
 print(result.candidates)
 print(result.metadata["quality_summary"])
@@ -590,20 +590,29 @@ list format. Persisted batches discard arrays after each job and return the exis
 
 ```python
 from proper_transient_finder import (
-    compare_survey_images, compare_survey_batch, load_science_list,
-    prepare_template_request, fetch_survey_template,
+    compare_survey_images,
+    compare_survey_batch,
+    load_science_list,
+    prepare_template_request,
+    fetch_survey_template,
 )
 
 plan = prepare_template_request("science.fits", "r", survey="auto")
 print(plan.to_dict())  # Local read only; includes HiPS id and science grid
 template = fetch_survey_template(plan, "survey_cache")  # Explicit HTTPS acquisition
 result = compare_survey_images(
-    "science.fits", "results/survey_002", template_filter="r",
-    template_units="adu", cache_dir="survey_cache",
+    "science.fits",
+    "results/survey_002",
+    template_filter="r",
+    template_units="adu",
+    cache_dir="survey_cache",
 )
 report = compare_survey_batch(
-    load_science_list("science.txt"), "results/survey_batch_002",
-    template_filter="r", template_units="adu", cache_dir="survey_cache",
+    load_science_list("science.txt"),
+    "results/survey_batch_002",
+    template_filter="r",
+    template_units="adu",
+    cache_dir="survey_cache",
 )
 ```
 
@@ -710,12 +719,12 @@ The public Python entry point returns a DataFrame and saves the standard product
 from proper_transient_finder import compare_cross_filter
 
 candidates = compare_cross_filter(
-  "reference_r.fits",
-  "science_bp.fits",
-  "cross_filter_results",
-  reproject=True,
-  psf_radius=10,
-  max_scale_scatter=0.4,
+    "reference_r.fits",
+    "science_bp.fits",
+    "cross_filter_results",
+    reproject=True,
+    psf_radius=10,
+    max_scale_scatter=0.4,
 )
 ```
 
@@ -881,12 +890,15 @@ from proper_transient_finder import BatchJob, PipelineConfig, compare_batch
 
 jobs = [
     BatchJob("night_1", "reference.fits", "night_1.fits"),
-    BatchJob("night_2", "reference.fits", "night_2.fits",
-             config={"plots": False}, threshold_sigma=6.0),
+    BatchJob(
+        "night_2", "reference.fits", "night_2.fits", config={"plots": False}, threshold_sigma=6.0
+    ),
 ]
 report = compare_batch(
-    jobs, output_dir="results/batch_001",
-    config=PipelineConfig(plots=False), fail_fast=False,
+    jobs,
+    output_dir="results/batch_001",
+    config=PipelineConfig(plots=False),
+    fail_fast=False,
 )
 for item in report.items:
     print(item.name, item.state, item.accepted_candidates, item.error)
