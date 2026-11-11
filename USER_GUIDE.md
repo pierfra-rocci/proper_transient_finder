@@ -4,7 +4,7 @@
 
 Developed with assistance from ChatGPT, Claude, and Mistral.
 
-Version: `0.3.0`.
+Version: `0.3.1`.
 
 This standalone manual covers the astronomical subtraction pipeline, its
 launcher, its regression tests, and the commands used to run and validate it.
@@ -155,7 +155,7 @@ bash scripts/tasks.sh lint
 bash scripts/tasks.sh test -q -k preflight
 bash scripts/tasks.sh docs --check --build
 bash scripts/tasks.sh build --no-isolation
-bash scripts/tasks.sh verify-install --distribution dist/proper_transient_finder-0.3.0-py3-none-any.whl
+bash scripts/tasks.sh verify-install --distribution dist/proper_transient_finder-0.3.1-py3-none-any.whl
 ```
 
 Its options mirror the PowerShell parameters: `--output-directory` for
@@ -250,7 +250,7 @@ To prepare all runtime and test dependencies for offline installation:
 & (Join-Path $PipelineRoot "scripts\build.ps1") -PythonPath $Python -NoIsolation -IncludeDependencies
 $Dist = Join-Path $PipelineRoot "dist"
 $Wheelhouse = Join-Path $Dist "wheelhouse"
-$Wheel = Join-Path $Dist "proper_transient_finder-0.3.0-py3-none-any.whl"
+$Wheel = Join-Path $Dist "proper_transient_finder-0.3.1-py3-none-any.whl"
 & $Python -m pip install --no-index --find-links $Wheelhouse $Wheel
 ```
 
@@ -265,7 +265,7 @@ Verify a genuine fresh installation, not an editable checkout:
 
 ```powershell
 & (Join-Path $PipelineRoot "scripts\verify_install.ps1") -PythonPath $Python -DistributionPath $Wheel -Wheelhouse $Wheelhouse
-$SourceArchive = Join-Path $Dist "proper_transient_finder-0.3.0.tar.gz"
+$SourceArchive = Join-Path $Dist "proper_transient_finder-0.3.1.tar.gz"
 & (Join-Path $PipelineRoot "scripts\verify_install.ps1") -PythonPath $Python -DistributionPath $SourceArchive -Wheelhouse $Wheelhouse
 ```
 
@@ -616,10 +616,13 @@ options include `config`, `science_filter`, `template_units`, `template_gain`,
 #### Cache, Provenance, Diagnostics And Limits
 
 Only the science WCS, image dimensions, HiPS identifier, template band and
-optional science epoch are sent over HTTPS to `alasky.cds.unistra.fr` or its
-`alasky.u-strasbg.fr` fallback (plus the corresponding `alaskybis` mirrors).
-Science pixels and local paths are not uploaded. Requests and redirects are
-restricted to these hosts; TLS verification stays enabled. The default network
+optional science epoch are sent over HTTPS to the CDS HiPS services. Each
+request tries `alaskybis.cds.unistra.fr`, then `alasky.u-strasbg.fr`, then
+`alasky.cds.unistra.fr`, and retries that sequence up to three times, pausing
+briefly between cycles, before reporting failure. The MOC coverage pre-check uses the same three-host order
+and retry sequence. Science pixels and local paths are not uploaded. Requests
+and redirects are restricted to these hosts (plus the other `alasky` mirrors);
+TLS verification stays enabled. The default network
 socket timeout is 30 seconds; FITS responses are limited to 512 MB by default,
 and the configurable maximum is also 512 MB. The timeout is not a total-run
 deadline, and the response-size limit is not a full-run memory bound.
@@ -1260,7 +1263,7 @@ To see individual test names or investigate one behavior:
 & $Python -m pytest -c $Configuration $AstroTests -q -k properimage
 ```
 
-The current suite expands to 211 test cases, including parameterized invalid
+The current suite expands to 213 test cases, including parameterized invalid
 configuration and preflight checks. It covers:
 
 - Score calibration, preservation of bright sources, and invalid-pixel masks.

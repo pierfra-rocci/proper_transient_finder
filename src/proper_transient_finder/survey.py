@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, replace
 from io import BytesIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import TYPE_CHECKING, Any
 from urllib.error import URLError
 from urllib.parse import urlencode, urlsplit
@@ -64,12 +64,18 @@ SURVEY_HOSTS = {
     "alaskybis.u-strasbg.fr",
 }
 HIPS_SERVICE_URLS = (
-    "https://alasky.cds.unistra.fr/hips-image-services/hips2fits",
+    "https://alaskybis.cds.unistra.fr/hips-image-services/hips2fits",
     "https://alasky.u-strasbg.fr/hips-image-services/hips2fits",
+    "https://alasky.cds.unistra.fr/hips-image-services/hips2fits",
 )
+# One pass through every service host is retried at most this many times.
+SERVICE_ATTEMPTS = 3
+# Pause between HiPS retry cycles so a brief service outage can recover.
+HIPS_RETRY_DELAY_SECONDS = 0.5
 MOC_SERVICE_URLS = (
-    "https://alasky.cds.unistra.fr/MocServer/query",
+    "https://alaskybis.cds.unistra.fr/MocServer/query",
     "https://alasky.u-strasbg.fr/MocServer/query",
+    "https://alasky.cds.unistra.fr/MocServer/query",
 )
 SURVEY_WARNING = (
     "HiPS survey templates are coadded, resampled products rather than original "
@@ -344,12 +350,15 @@ def _download_hips(request: TemplateRequest, timeout: float, limit: int) -> tupl
         "wcs": json.dumps(dict(wcs_header), sort_keys=True),
     }
     failures = []
-    for base in HIPS_SERVICE_URLS:
-        url = base + "?" + urlencode(parameters)
-        try:
-            return _download_url(url, timeout, limit), url, hips_id
-        except OSError as error:
-            failures.append(f"{urlsplit(base).hostname}: {error}")
+    for attempt in range(SERVICE_ATTEMPTS):
+        if attempt:
+            sleep(HIPS_RETRY_DELAY_SECONDS)
+        for base in HIPS_SERVICE_URLS:
+            url = base + "?" + urlencode(parameters)
+            try:
+                return _download_url(url, timeout, limit), url, hips_id
+            except OSError as error:
+                failures.append(f"{urlsplit(base).hostname}: {error}")
     raise URLError("HiPS download failed for every service host: " + "; ".join(failures))
 
 
@@ -435,27 +444,28 @@ def _check_hips_coverage(request: TemplateRequest, timeout: float, *, enabled: b
         "fmt": "json",
     }
     failures = []
-    for base in MOC_SERVICE_URLS:
-        url = base + "?" + urlencode(parameters)
-        try:
-            identifiers = _moc_record_ids(_download_url(url, timeout, _MOC_RESPONSE_LIMIT))
-        except (OSError, ValueError) as error:
-            failures.append(f"{urlsplit(base).hostname}: {error}")
-            continue
-        covered = any(
-            identifier == hips_id or identifier.casefold() == hips_id.casefold()
-            for identifier in identifiers
-        )
-        checked = {
-            **result,
-            "status": "covered" if covered else "not_covered",
-            "covered": covered,
-            "query_url": url,
-            "polygon_vertices": (len(polygon.split()) - 1) // 2,
-        }
-        if identifiers and not covered:
-            checked["matched_ids"] = identifiers[:10]
-        return checked
+    for _ in range(SERVICE_ATTEMPTS):
+        for base in MOC_SERVICE_URLS:
+            url = base + "?" + urlencode(parameters)
+            try:
+                identifiers = _moc_record_ids(_download_url(url, timeout, _MOC_RESPONSE_LIMIT))
+            except (OSError, ValueError) as error:
+                failures.append(f"{urlsplit(base).hostname}: {error}")
+                continue
+            covered = any(
+                identifier == hips_id or identifier.casefold() == hips_id.casefold()
+                for identifier in identifiers
+            )
+            checked = {
+                **result,
+                "status": "covered" if covered else "not_covered",
+                "covered": covered,
+                "query_url": url,
+                "polygon_vertices": (len(polygon.split()) - 1) // 2,
+            }
+            if identifiers and not covered:
+                checked["matched_ids"] = identifiers[:10]
+            return checked
     return {
         **result,
         "status": "unavailable",

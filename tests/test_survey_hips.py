@@ -127,9 +127,29 @@ def test_hips_download_falls_back_to_the_second_service_host(tmp_path, monkeypat
     monkeypatch.setattr(survey, "_download_url", download)
     template = survey.fetch_survey_template(request, tmp_path / "cache")
     assert len(calls) == 2
-    assert "alasky.cds.unistra.fr" in calls[0]
+    assert "alaskybis.cds.unistra.fr" in calls[0]
     assert "alasky.u-strasbg.fr" in calls[1]
     assert template.metadata["query_url"] == calls[1]
+
+
+def test_hips_download_retries_all_service_hosts_before_giving_up(tmp_path, monkeypatch):
+    science, _ = science_image(tmp_path)
+    request = survey.prepare_template_request(science, "r")
+    calls = []
+    delays = []
+
+    def download(url, timeout, limit):
+        calls.append(url)
+        raise URLError("service unavailable")
+
+    monkeypatch.setattr(survey, "_download_url", download)
+    monkeypatch.setattr(survey, "sleep", delays.append)
+    with pytest.raises(URLError, match="every service host"):
+        survey.fetch_survey_template(request, tmp_path / "cache")
+    hosts = [urlsplit(url).hostname for url in calls]
+    expected = [urlsplit(base).hostname for base in survey.HIPS_SERVICE_URLS]
+    assert hosts == expected * survey.SERVICE_ATTEMPTS
+    assert delays == [survey.HIPS_RETRY_DELAY_SECONDS] * (survey.SERVICE_ATTEMPTS - 1)
 
 
 def test_survey_options_deliver_a_grid_aligned_template_without_reprojection():
@@ -251,6 +271,28 @@ def test_moc_coverage_precheck_warns_and_continues_when_service_is_unavailable(
     assert "MOC service unavailable" in coverage["error"]
     assert "coverage pre-check was unavailable" in " ".join(template.metadata["warnings"])
     assert "hips2fits" in calls[-1]
+
+
+def test_moc_coverage_precheck_retries_all_service_hosts_before_giving_up(
+    tmp_path, monkeypatch
+):
+    identifier = "CDS/P/DESI-Legacy-Surveys/DR10/r"
+    science, wcs = science_image(tmp_path)
+    request = survey.prepare_template_request(science, "r", survey=identifier)
+    calls = []
+
+    def download(url, timeout, limit):
+        calls.append(url)
+        if "/MocServer/query" in url:
+            raise URLError("MOC service unavailable")
+        return payload(np.ones((64, 64)), wcs.to_header())
+
+    monkeypatch.setattr(survey, "_download_url", download)
+    template = survey.fetch_survey_template(request, tmp_path / "cache")
+    hosts = [urlsplit(url).hostname for url in calls if "/MocServer/query" in url]
+    expected = [urlsplit(base).hostname for base in survey.MOC_SERVICE_URLS]
+    assert hosts == expected * survey.SERVICE_ATTEMPTS
+    assert template.metadata["coverage_check"]["status"] == "unavailable"
 
 
 def test_moc_coverage_precheck_can_be_explicitly_disabled(tmp_path, monkeypatch):

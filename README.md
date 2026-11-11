@@ -8,7 +8,7 @@ transient-candidate analysis. Python 3.11 or newer is required.
 The distribution is named `proper-transient-finder`; import it as
 `proper_transient_finder`.
 
-Current release: `0.3.0`.
+Current release: `0.3.1`.
 
 Inputs can use `.fits`, `.fit`, `.fts`, gzip compression (`.fits.gz`, `.fit.gz`,
 `.fts.gz`) or FITS tiled compression (`.fits.fz`, `.fit.fz`, `.fts.fz`). No manual
@@ -19,7 +19,7 @@ decompression is required; files must retain their original binary contents.
 Install a built wheel into your chosen Python environment:
 
 ```powershell
-python -m pip install ./dist/proper_transient_finder-0.3.0-py3-none-any.whl
+python -m pip install ./dist/proper_transient_finder-0.3.1-py3-none-any.whl
 python -m pip check
 ```
 
