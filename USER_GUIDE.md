@@ -870,7 +870,10 @@ products from earlier runs, so a fresh directory remains preferable.
 
 `pipeline.log` retains stage progress, warnings, and failure tracebacks.
 `quality_summary.json` combines measured metrics, configured limits, caveats,
-candidate-group counts, rejection-reason counts, and timings. Timings for
+candidate-group counts, rejection-reason counts, and timings. PSF diagnostics
+include `ref_fwhm_pixels`, `new_fwhm_pixels`, and `psf_four_sigma_support_pixels`
+under `metrics`, with `minimum_psf_fwhm_pixels`, `psf_fwhm_estimator_tolerance`,
+and `maximum_psf_four_sigma_support_pixels` under `limits`. Timings for
 `prepare_and_subtract` include nested stages; do not sum overlapping durations.
 Quality warnings do not change detection thresholds or candidate flags.
 
@@ -1174,7 +1177,7 @@ Run `--help` for the installed interface. Defaults below describe this version.
 | `--flux-scale` | Estimated | Known reference multiplier; kernel backend only. |
 | `--no-beta` | Off | Disable photometric scale estimation. Kernel scale is one unless manually supplied. |
 | `--iterative` | Off | More ratio-clipping iterations for kernel; iterative estimation for ProperImage. |
-| `--psf-radius` | `8` | Input PSF kernel radius in pixels; support is `(2r+1)` squared. |
+| `--psf-radius` | `8` | Input PSF kernel radius in pixels; support is `(2r+1)` squared. Automatic Gaussian PSFs must fit their 4σ support within `r + 1` pixels. |
 | `--ref-psf`, `--new-psf` | Estimated Gaussian PSFs | Both supplied PSFs are required together; kernel backend only. |
 | `--ref-mask`, `--new-mask` | None | Additional same-shape input quality masks. |
 | `--no-cosmic-rays` | Off | Disable the pipeline's preprocessing L.A.Cosmic step. ProperImage can still run its own internal cleaning. |
@@ -1285,7 +1288,7 @@ To see individual test names or investigate one behavior:
 & $Python -m pytest -c $Configuration $AstroTests -q -k properimage
 ```
 
-The current suite expands to 218 test cases, including parameterized invalid
+The current suite expands to 223 test cases, including parameterized invalid
 configuration and preflight checks. It covers:
 
 - Score calibration, preservation of bright sources, and invalid-pixel masks.
@@ -1612,7 +1615,8 @@ pairs at the default radius 8 with automatic PSFs:
 Both runs used `PipelineConfig(plots=False)` on one clean scene and one noise
 seed, so this is not a rerun of the 40-case campaign; the detector, trail and
 masked scenes still need their own automatic-PSF pass. The support guard remains
-in force: a genuinely broad PSF must raise `--psf-radius` rather than be
+in force: an automatic Gaussian must fit its 4σ support within one pixel of the
+stamp radius, so a genuinely broad PSF must raise `--psf-radius` rather than be
 cropped, and supplied measured PSFs remain the preferred option for real data.
 
 **Known-PSF control:** all 40 cases completed. Median/range across all 20 cases
@@ -1699,6 +1703,7 @@ false-positive rate, or calibrated scientific uncertainties for your instrument.
 | Invalid celestial WCS or insufficient WCS overlap | Use calibrated 2D image cutouts with accurate celestial WCS and enough common unmasked stars. |
 | Inconsistent flux ratios | Check filter, calibration, variable stars, alignment, PSF quality, and spatial transparency changes. |
 | PSF extends beyond kernel | Increase `--psf-radius` for a valid broad/supplied PSF and inspect its normalization and wings. |
+| PSF is undersampled | Automatic Gaussian PSFs below 1.5 px FWHM are rejected, with a 2% estimator tolerance applied. Improve sampling, inspect the PSF stars, or supply measured `--ref-psf`/`--new-psf` stamps. |
 | Non-count units require VAR/ERR | Supply total variance in the actual image units or convert to calibrated detector counts. |
 | Many rejected candidates or candidate limit exceeded | Inspect dipoles, saturated stars, cosmic rays, background structure, and PSF mismatch before changing thresholds. |
 | Large masked regions or too few valid score pixels | Inspect bad-pixel/saturation masks and convolution support; large kernels can leave little usable area. |

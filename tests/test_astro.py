@@ -1369,6 +1369,86 @@ def test_real_properimage_psfs_and_photometric_scaling(tmp_path) -> None:
     assert mask.dtype == bool
 
 
+def gaussian_seeing_pair(directory, sigma, *, seed=11):
+    """Render one star field seen through an exact Gaussian PSF of ``sigma`` pixels."""
+    from proper_transient_finder.astro import convolve_image
+
+    rng = np.random.default_rng(seed)
+    shape = (256, 256)
+    stars = np.zeros(shape)
+    for row in (40, 75, 110, 145, 180, 215):
+        for column in (40, 75, 110, 145, 180, 215):
+            star_row, star_column = row + rng.integers(-5, 6), column + rng.integers(-5, 6)
+            stars[star_row, star_column] = rng.uniform(10000, 20000)
+    image = convolve_image(stars, Gaussian2DKernel(sigma).array)
+    header = fits.Header({"GAIN": 2.0, "SATURATE": 50000})
+    paths = []
+    for name in ("reference", "new"):
+        frame = image + 100 + rng.normal(0, 2, shape)
+        if name == "new":
+            frame[128, 128] += 6000
+        path = directory / f"{name}.fits"
+        fits.writeto(path, frame, header)
+        paths.append(path)
+    return paths
+
+
+def test_psf_guard_accepts_four_sigma_support_up_to_one_pixel_beyond_stamp(tmp_path) -> None:
+    """Seeing near radius / 4 must not hard-fail on sub-pixel fit scatter."""
+    paths = gaussian_seeing_pair(tmp_path, 2.1)
+    pipeline = ProperTransientFinder(*paths, tmp_path / "out", {"cosmic_rays": False})
+    _, psf, _, _ = pipeline.perform_image_subtraction()
+    sigma = pipeline.metadata["new_fwhm_pixels"] / 2.35482
+    radius = pipeline.options.psf_radius
+    assert sigma == pytest.approx(2.1, rel=0.05)
+    # This is exactly the band the bare 4-sigma rule rejected outright.
+    assert radius < 4 * sigma <= radius + 1
+    assert psf.sum() == pytest.approx(1.0)
+
+
+def test_psf_guard_rejects_gaussian_wider_than_stamp_tolerance(tmp_path) -> None:
+    paths = gaussian_seeing_pair(tmp_path, 2.7)
+    pipeline = ProperTransientFinder(*paths, tmp_path / "out", {"cosmic_rays": False})
+    with pytest.raises(ValueError, match="Gaussian PSF too wide for radius 8") as error:
+        pipeline.perform_image_subtraction()
+    assert "increase --psf-radius to at least" in str(error.value)
+
+
+def test_psf_guard_accepts_psf_at_minimum_sampling_limit(tmp_path) -> None:
+    """A 1.5 px FWHM PSF must survive the moment estimator reading slightly low."""
+    paths = gaussian_seeing_pair(tmp_path, 1.5 / 2.35482)
+    pipeline = ProperTransientFinder(*paths, tmp_path / "out", {"cosmic_rays": False})
+    pipeline.perform_image_subtraction()
+    assert pipeline.metadata["new_fwhm_pixels"] >= 1.5 * 0.98
+
+
+def test_psf_guard_rejects_undersampled_psf(tmp_path) -> None:
+    paths = gaussian_seeing_pair(tmp_path, 1.3 / 2.35482)
+    pipeline = ProperTransientFinder(*paths, tmp_path / "out", {"cosmic_rays": False})
+    with pytest.raises(ValueError, match="undersampled"):
+        pipeline.perform_image_subtraction()
+
+
+def test_quality_summary_reports_psf_sampling_and_support_margins(tmp_path) -> None:
+    """Measured PSF width and its guard limits belong in the diagnostic summary."""
+    paths = gaussian_seeing_pair(tmp_path, 2.1)
+    pipeline = ProperTransientFinder(*paths, tmp_path / "out", {"cosmic_rays": False})
+    pipeline.perform_image_subtraction()
+    summary = pipeline.quality_summary()
+    support = summary["metrics"]["psf_four_sigma_support_pixels"]
+    assert summary["metrics"]["new_fwhm_pixels"] == pytest.approx(
+        astro.FWHM_PER_SIGMA * 2.1, rel=0.05
+    )
+    assert support == pytest.approx(4 * 2.1, rel=0.05)
+    limits = summary["limits"]
+    assert limits["minimum_psf_fwhm_pixels"] == astro.PSF_MIN_FWHM_PIXELS
+    assert limits["psf_fwhm_estimator_tolerance"] == astro.PSF_FWHM_ESTIMATOR_TOLERANCE
+    assert limits["maximum_psf_four_sigma_support_pixels"] == (
+        pipeline.options.psf_radius + astro.PSF_SUPPORT_MARGIN_PIXELS
+    )
+    assert support < limits["maximum_psf_four_sigma_support_pixels"]
+
+
 def test_cross_filter_requires_opt_in_and_compatible_units(tmp_path) -> None:
     paths = synthetic_pair(tmp_path)
     data, header = fits.getdata(paths[1], header=True, memmap=False)

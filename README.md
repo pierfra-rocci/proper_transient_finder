@@ -273,7 +273,8 @@ automatic PSFs completed in 25.5 s at 20 MB and 65.5 s at 50 MB, with FWHM
 50 MB injections (the 1,800 ADU source was missed at 20 MB). These are
 single-pair checks, not a rerun of the 40-case campaign, and other scenes and
 observed transients remain unvalidated. The known-PSF control above used the
-injection-model PSFs and did **not** exercise automatic estimation.
+injection-model PSFs and did **not** exercise automatic estimation. Measured PSF
+widths, 4σ support, and their guard limits are reported in `quality_summary.json`.
 See [the full benchmark guide](USER_GUIDE.md#medium-fits-robustness-and-timing).
 
 ## Documentation

@@ -42,6 +42,11 @@ CROSS_FILTER_WARNING = (
     "Experimental cross-filter residual; color differences can mimic variability. "
     "Flux errors exclude color mismatch; scores are not calibrated variability significance."
 )
+FWHM_PER_SIGMA = 2.35482
+PSF_MIN_FWHM_PIXELS = 1.5
+PSF_FWHM_ESTIMATOR_TOLERANCE = 0.02
+PSF_SUPPORT_SIGMA = 4.0
+PSF_SUPPORT_MARGIN_PIXELS = 1.0
 CANDIDATE_COLUMNS = [
     "id",
     "x_centroid",
@@ -364,7 +369,7 @@ def psf_fwhm(psf: np.ndarray) -> float:
     row, column = np.indices(psf.shape)
     center_row, center_column = ndimage.center_of_mass(psf)
     moment = np.sum(psf * ((row - center_row) ** 2 + (column - center_column) ** 2))
-    return float(2.35482 * np.sqrt(moment / (2 * psf.sum())))
+    return float(FWHM_PER_SIGMA * np.sqrt(moment / (2 * psf.sum())))
 
 
 def expand_mask(mask: np.ndarray, radius: int) -> np.ndarray:
@@ -1099,15 +1104,28 @@ class ProperTransientFinder:
             radius = self.options.psf_radius
             row, column = np.mgrid[-radius : radius + 1, -radius : radius + 1]
             psf = model(column, row)
-            if 4 * max(model.x_stddev.value, model.y_stddev.value) > radius:
-                required = int(np.ceil(4 * max(model.x_stddev.value, model.y_stddev.value)))
+            # Four sigma is the support target, but the fitted stddev carries
+            # sub-pixel scatter between platforms and library versions, and a
+            # Gaussian truncated at exactly 4 sigma loses <0.2% of its flux,
+            # under the 0.5% tolerance enforced by normalize_psf. Allow that one
+            # pixel of stamp margin so seeing near radius / 4 is not a knife-edge.
+            support = PSF_SUPPORT_SIGMA * max(model.x_stddev.value, model.y_stddev.value)
+            if support > radius + PSF_SUPPORT_MARGIN_PIXELS:
+                required = int(np.ceil(support))
                 raise ValueError(
                     f"Gaussian PSF too wide for radius {radius}; "
                     f"increase --psf-radius to at least {required}"
                 )
         psf = normalize_psf(psf, self.options.psf_radius)
-        if psf_fwhm(psf) < 1.5:
-            raise ValueError("PSF is undersampled (<1.5 pixels FWHM); inspect the PSF stars")
+        # The second moment is discretized on the pixel grid, so psf_fwhm reads
+        # ~0.5% low for a 1.5 px stamp and a PSF meeting the nominal sampling
+        # limit would be rejected by estimator bias alone. The 2% tolerance
+        # admits it while a 1.45 px PSF still fails.
+        fwhm = psf_fwhm(psf)
+        if fwhm < PSF_MIN_FWHM_PIXELS * (1 - PSF_FWHM_ESTIMATOR_TOLERANCE):
+            raise ValueError(
+                f"PSF is undersampled ({fwhm:.2f} pixels FWHM; minimum 1.5); inspect the PSF stars"
+            )
         return psf
 
     def _flux_scale(self, reference: np.ndarray, new: np.ndarray) -> float:
@@ -1239,9 +1257,14 @@ class ProperTransientFinder:
         with self._stage("psf_estimation"):
             self.ref_psf = self._estimate_psf(self.reference, self.options.ref_psf)
             self.new_psf = self._estimate_psf(self.new, self.options.new_psf)
+        ref_fwhm = psf_fwhm(self.ref_psf)
+        new_fwhm = psf_fwhm(self.new_psf)
         self.metadata.update(
-            ref_fwhm_pixels=psf_fwhm(self.ref_psf),
-            new_fwhm_pixels=psf_fwhm(self.new_psf),
+            ref_fwhm_pixels=ref_fwhm,
+            new_fwhm_pixels=new_fwhm,
+            psf_four_sigma_support_pixels=(
+                PSF_SUPPORT_SIGMA * max(ref_fwhm, new_fwhm) / FWHM_PER_SIGMA
+            ),
             flux_unit="new-image counts",
             method=self.options.method,
         )
@@ -1646,6 +1669,7 @@ class ProperTransientFinder:
             "matched_stars",
             "ref_fwhm_pixels",
             "new_fwhm_pixels",
+            "psf_four_sigma_support_pixels",
             "flux_scale",
             "flux_scale_scatter",
             "flux_scale_stars",
@@ -1667,6 +1691,11 @@ class ProperTransientFinder:
                 "registration_rms_pixels": self.options.alignment_tolerance,
                 "stellar_scale_scatter": self.options.max_scale_scatter,
                 "minimum_stars": self.options.min_stars,
+                "minimum_psf_fwhm_pixels": PSF_MIN_FWHM_PIXELS,
+                "psf_fwhm_estimator_tolerance": PSF_FWHM_ESTIMATOR_TOLERANCE,
+                "maximum_psf_four_sigma_support_pixels": (
+                    self.options.psf_radius + PSF_SUPPORT_MARGIN_PIXELS
+                ),
             },
             "rejection_reasons": counts,
             "warnings": warnings,
