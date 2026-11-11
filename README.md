@@ -1,5 +1,14 @@
 # Proper Transient Finder
 
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/pierfra-rocci/proper_transient_finder/blob/main/LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue)](https://www.python.org/)
+[![GitHub stars](https://img.shields.io/github/stars/pierfra-rocci/proper_transient_finder)](https://github.com/pierfra-rocci/proper_transient_finder/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/pierfra-rocci/proper_transient_finder)](https://github.com/pierfra-rocci/proper_transient_finder/forks)
+[![GitHub issues](https://img.shields.io/github/issues/pierfra-rocci/proper_transient_finder)](https://github.com/pierfra-rocci/proper_transient_finder/issues)
+[![Version](https://img.shields.io/badge/version-0.3.1-blue)](https://github.com/pierfra-rocci/proper_transient_finder/releases)
+
+
 **Compare two images of the sky to spot what changed.**
 
 Python library for PSF-matched FITS difference imaging and unconfirmed
