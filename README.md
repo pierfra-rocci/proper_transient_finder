@@ -117,8 +117,10 @@ print(report.successful)
 
 Each pair gets a separate output folder and normal logs/products. An atomic
 `batch_summary.json` tracks progress and failures. Failed pairs do not stop
-later pairs unless `fail_fast=True`. The batch root must be new or empty,
-even with overwrite enabled. Persisted batches retain lightweight reports;
+later pairs unless `fail_fast=True`. The batch root must be new or empty, or
+is cleared first when `overwrite=True`/`--overwrite` is given; without the flag
+an interactive terminal is asked to confirm the replacement, and `--yes` answers
+that prompt. Persisted batches retain lightweight reports;
 without `output_dir`, they write nothing and retain full results in
 `item.result`. Use `retain_results` to override that memory policy.
 
@@ -220,7 +222,9 @@ confirmed variability.
 of path strings is also supported. Paths are relative to the list file. This is
 separate from the existing `--batch` ref/new manifest. Processing is sequential,
 continues after failed images unless `--fail-fast` is set, and retains lightweight
-reports. Results and cache directories must be separate; results must be new or empty.
+reports. Results and cache directories must be separate; results must be new or empty
+unless `--overwrite` is given, which clears the previous results root first, or an
+interactive terminal (or `--yes`) confirms the replacement.
 
 Each processed image gets `survey_reference.json`, `survey_diagnostic.png`, and
 the existing products under `analysis/`. Failed processing is explicitly labeled;

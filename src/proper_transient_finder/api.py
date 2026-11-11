@@ -20,7 +20,13 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from .astro import LOGGER, PipelineConfig, ProperTransientFinder, atomic_json
+from .astro import (
+    LOGGER,
+    PipelineConfig,
+    ProperTransientFinder,
+    _prepare_results_root,
+    atomic_json,
+)
 
 
 @dataclass(frozen=True)
@@ -151,13 +157,15 @@ def _prepare_batch(
     output_dir: str | PathLike[str] | None,
     config: PipelineConfig | Mapping[str, object] | None,
     threshold_sigma: float,
+    *,
+    clear: bool = True,
 ) -> tuple[Path | None, list[tuple[BatchJob, PipelineConfig, float, Path | None]]]:
     root = Path(output_dir).expanduser().resolve() if output_dir is not None else None
     try:
         settings = asdict(PipelineConfig(**_config_values(config)))
     except TypeError as error:
         raise ValueError("Unknown batch configuration option") from error
-    prepared, names = [], set()
+    prepared, names, protected = [], set(), []
     reserved = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
     reserved.update(f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(1, 10))
     for job in jobs:
@@ -197,15 +205,20 @@ def _prepare_batch(
             raise ValueError(
                 "Batch output directory must not contain any job's input image, mask, or PSF"
             )
+        protected.extend(paths)
         normalized = replace(job, reference_fits=pipeline.ref_path, science_fits=pipeline.new_path)
         prepared.append((normalized, pipeline.options, float(threshold), destination))
     if not prepared:
         raise ValueError("A batch must contain at least one job")
-    if root is not None and root.exists():
-        if not root.is_dir() or any(root.iterdir()):
-            raise FileExistsError(
-                "Batch output directory must be new or empty, even with overwrite enabled"
-            )
+    if root is not None:
+        _prepare_results_root(
+            root,
+            "Batch output directory",
+            overwrite=bool(settings.get("overwrite", False)),
+            assume_yes=bool(settings.get("assume_yes", False)),
+            protected=protected,
+            clear=clear,
+        )
     return root, prepared
 
 
@@ -266,7 +279,9 @@ def compare_batch(
 ) -> BatchResult:
     """Run named FITS pairs sequentially using the unchanged single-pair pipeline.
 
-    Each persisted job writes under output_dir/name; the root must be new/empty.
+    Each persisted job writes under output_dir/name; the root must be new/empty,
+    or is replaced first when overwrite is enabled, an interactive terminal
+    confirms the replacement, or assume_yes is set.
     batch_summary.json is atomically updated before/after each job. Structural
     name/config/output errors raise before any processing or output creation.
     Image-processing exceptions are recorded per job. By default execution
@@ -278,7 +293,7 @@ def compare_batch(
     input preflight is performed without creating any outputs or subtracting.
     Scientific defaults, input checks, and cross-filter caveats remain unchanged.
     """
-    root, prepared = _prepare_batch(jobs, output_dir, config, threshold_sigma)
+    root, prepared = _prepare_batch(jobs, output_dir, config, threshold_sigma, clear=not check_only)
     retain = root is None if retain_results is None else retain_results
     items = [
         BatchItemResult(

@@ -313,6 +313,7 @@ def test_survey_batch_rejects_invalid_shared_options_before_writes(tmp_path, opt
         ["--science-list", "science.txt"],
         ["--survey", "auto", "--new", "science.fits", "--science-list", "science.txt"],
         ["--no-moc-precheck", "--ref", "ref.fits", "--new", "new.fits"],
+        ["--ref", "ref.fits", "--new", "new.fits", "--yes"],
     ],
 )
 def test_survey_cli_rejects_incompatible_inputs(arguments):
@@ -352,6 +353,36 @@ def test_survey_cli_routes_science_list_without_local_reference(tmp_path, monkey
         == 0
     )
     assert json.loads(capsys.readouterr().out)["state"] == "checked"
+
+
+def test_survey_cli_routes_yes_to_the_replacement_prompt_answer(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from proper_transient_finder import survey
+
+    def compare(science, output, **options):
+        assert options["config"]["assume_yes"] is True
+        assert not options["config"]["overwrite"]
+        return SimpleNamespace(candidates=[], rejected_candidates=[])
+
+    monkeypatch.setattr(survey, "compare_survey_images", compare)
+    assert (
+        astro.main(
+            [
+                "--survey",
+                "auto",
+                "--new",
+                str(tmp_path / "science.fits"),
+                "--template-filter",
+                "r",
+                "-y",
+                "--no-moc-precheck",
+                "--output",
+                str(tmp_path / "results"),
+            ]
+        )
+        == 0
+    )
 
 
 def test_survey_cli_can_disable_the_moc_coverage_precheck(tmp_path, monkeypatch):
@@ -892,10 +923,59 @@ def test_batch_prevalidates_all_configs_and_protects_existing_outputs(tmp_path) 
     output.mkdir()
     marker = output / "keep.txt"
     marker.write_text("original", encoding="utf-8")
-    with pytest.raises(FileExistsError, match="new or empty"):
-        compare_batch(jobs[:1], output, config={"overwrite": True})
+    with pytest.raises(FileExistsError, match="--overwrite"):
+        compare_batch(jobs[:1], output)
     assert marker.read_text(encoding="utf-8") == "original"
     assert list(output.iterdir()) == [marker]
+
+
+def test_batch_confirms_interactive_replacement_of_an_existing_root(tmp_path, monkeypatch) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    from proper_transient_finder import BatchJob, compare_batch
+
+    output = tmp_path / "batch"
+    output.mkdir()
+    marker = output / "stale.json"
+    marker.write_text("{}", encoding="utf-8")
+    jobs = [BatchJob("first", "ref", "new")]
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "n")
+    with pytest.raises(FileExistsError, match="--overwrite"):
+        compare_batch(jobs, output)
+    assert marker.exists()
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+    report = compare_batch(jobs, output)
+    assert report.state == "completed_with_errors"
+    assert not marker.exists()
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("prompted"))
+    compare_batch(jobs, output, config={"overwrite": True})
+    marker.write_text("{}", encoding="utf-8")
+    compare_batch(jobs, output, config={"assume_yes": True})
+    assert not marker.exists()
+
+
+def test_batch_overwrite_replaces_the_previous_results_root(tmp_path) -> None:
+    from proper_transient_finder import BatchJob, compare_batch
+
+    output = tmp_path / "batch"
+    stale_product = output / "first" / "old_product.fits"
+    stale_product.parent.mkdir(parents=True)
+    stale_product.write_text("stale", encoding="utf-8")
+    jobs = [BatchJob("first", "ref", "new")]
+
+    report = compare_batch(jobs, output, config={"overwrite": True})
+    assert report.state == "completed_with_errors"
+    assert not stale_product.exists()
+    assert (output / "batch_summary.json").exists()
+
+    before = sorted(path.name for path in output.iterdir())
+    compare_batch(jobs, output, config={"overwrite": True}, check_only=True)
+    assert sorted(path.name for path in output.iterdir()) == before
 
 
 @pytest.mark.parametrize(

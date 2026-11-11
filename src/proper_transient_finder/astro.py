@@ -10,8 +10,10 @@ import hashlib
 import json
 import logging
 import platform
+import shutil
+import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -68,6 +70,57 @@ BACKGROUND_COLUMNS = [
     "local_structure_rms",
     "local_background_warning",
 ]
+
+
+def _confirm_replacement(label: str, root: Path) -> bool:
+    """Ask whether a non-empty results root may be replaced; only on a real terminal."""
+    probe = getattr(sys.stdin, "isatty", None)
+    if probe is None or not probe():
+        return False
+    try:
+        answer = input(f"{label} {root} is not empty; replace its contents? [y/N] ")
+    except (EOFError, OSError):
+        return False
+    return answer.strip().lower() in {"y", "yes"}
+
+
+def _prepare_results_root(
+    root: Path,
+    label: str,
+    *,
+    overwrite: bool,
+    assume_yes: bool = False,
+    protected: Iterable[str | Path | None] = (),
+    clear: bool = True,
+) -> None:
+    """Prepare a results root: new, empty, replaced with overwrite, or confirmed interactively."""
+    inputs = {Path(path).expanduser().resolve() for path in protected if path}
+    if not root.exists():
+        return
+    if not root.is_dir():
+        raise ValueError(f"{label} must be a directory, not a file")
+    if not any(root.iterdir()):
+        return
+    if not clear:
+        if overwrite:
+            return
+        raise FileExistsError(
+            f"{label} is not empty; choose another directory or pass --overwrite to replace it"
+        )
+    if not overwrite and not assume_yes and not _confirm_replacement(label, root):
+        raise FileExistsError(
+            f"{label} is not empty; choose another directory, pass --overwrite, "
+            "or confirm with --yes"
+        )
+    for child in root.iterdir():
+        if child.resolve() in inputs:
+            raise ValueError(
+                f"{label} contains an input image, mask, or PSF; refusing to replace it"
+            )
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
 
 
 def atomic_json(path: Path, payload: dict) -> None:
@@ -549,6 +602,7 @@ class PipelineConfig:
     max_candidates: int = 1000
     plots: bool = True
     overwrite: bool = False
+    assume_yes: bool = False
     cross_filter: bool = False
     color_association_fwhm: float = 1.0
     color_reference_snr: float = 5.0
@@ -2117,6 +2171,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-cosmic-rays", action="store_true")
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "-y",
+        "--yes",
+        dest="assume_yes",
+        action="store_true",
+        help="Replace a non-empty survey or batch results root without asking",
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument(
         "--check-only",
@@ -2173,6 +2234,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--ref and --new are required unless --batch is provided")
         if fail_fast:
             parser.error("--fail-fast requires --batch")
+        if args["assume_yes"]:
+            parser.error("--yes requires --survey or --batch")
     if not survey:
         args["science_filter"] = survey_options.pop("science_filter")
     logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)

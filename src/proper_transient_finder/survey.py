@@ -32,7 +32,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 
 from ._version import __version__
-from .astro import _science_hdu
+from .astro import _prepare_results_root, _science_hdu
 
 if TYPE_CHECKING:
     from .api import BatchResult, PipelineResult
@@ -778,8 +778,14 @@ def compare_survey_images(
         raise ValueError("Survey cache and results directories must be separate")
     if root == request.science_fits.parent or root in request.science_fits.parents:
         raise ValueError("Survey results must not contain the science input")
-    if root.exists() and (not root.is_dir() or any(root.iterdir())):
-        raise FileExistsError("Survey results directory must be new or empty")
+    _prepare_results_root(
+        root,
+        "Survey results directory",
+        overwrite=options.overwrite,
+        assume_yes=options.assume_yes,
+        protected=(options.ref_mask, options.new_mask, options.ref_psf, options.new_psf),
+        clear=not check_only,
+    )
     values = request.to_dict()
     cross_filter = request.science_filter != request.template_filter
     values.update(
@@ -1057,8 +1063,20 @@ def compare_survey_batch(
         raise ValueError("Survey cache and batch results must be separate")
     if any(root == path or root in path.parents for path in images):
         raise ValueError("Batch results must not contain science inputs")
-    if root.exists() and (not root.is_dir() or any(root.iterdir())):
-        raise FileExistsError("Survey batch results directory must be new or empty")
+    _prepare_results_root(
+        root,
+        "Survey batch results directory",
+        overwrite=settings.overwrite,
+        assume_yes=settings.assume_yes,
+        protected=(
+            *images,
+            settings.ref_mask,
+            settings.new_mask,
+            settings.ref_psf,
+            settings.new_psf,
+        ),
+        clear=not check_only,
+    )
     items = [
         BatchItemResult(
             f"science-{index:04d}", "pending", root / f"science-{index:04d}", science_fits=path

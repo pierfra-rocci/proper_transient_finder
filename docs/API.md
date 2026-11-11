@@ -40,7 +40,9 @@ compare_batch(jobs: Iterable[BatchJob], output_dir: str | PathLike[str] | None=N
 
 Run named FITS pairs sequentially using the unchanged single-pair pipeline.
 
-Each persisted job writes under output_dir/name; the root must be new/empty.
+Each persisted job writes under output_dir/name; the root must be new/empty,
+or is replaced first when overwrite is enabled, an interactive terminal
+confirms the replacement, or assume_yes is set.
 batch_summary.json is atomically updated before/after each job. Structural
 name/config/output errors raise before any processing or output creation.
 Image-processing exceptions are recorded per job. By default execution
@@ -236,6 +238,7 @@ Explicit assumptions and conservative candidate-selection defaults.
 | `max_candidates` | `int` | `1000` |
 | `plots` | `bool` | `True` |
 | `overwrite` | `bool` | `False` |
+| `assume_yes` | `bool` | `False` |
 | `cross_filter` | `bool` | `False` |
 | `color_association_fwhm` | `float` | `1.0` |
 | `color_reference_snr` | `float` | `5.0` |

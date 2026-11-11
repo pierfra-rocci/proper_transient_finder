@@ -649,9 +649,13 @@ labels/units, science grid hash and SHA-256 fingerprints. A cache hit verifies
 the FITS hash; corruption fails rather than silently reusing data. Unit/gain
 normalization writes separate cached copies and never alters science inputs.
 Keep the cache separate from results; each survey comparison results root must
-be new or empty even with `--overwrite`. Preserve manifests alongside FITS for
-auditing. Concurrent access to the same cache is not supported. Cached products
-are not automatically refreshed; use a new cache directory to reacquire.
+be new or empty unless `--overwrite` is passed, which replaces the previous
+contents of that root (never science inputs, masks, or PSFs); without the flag an
+interactive terminal is asked to confirm, and `--yes` answers that prompt.
+Preserve manifests
+alongside FITS for auditing. Concurrent access to the same cache is not
+supported. Cached products are not automatically refreshed; use a new cache
+directory to reacquire.
 
 Single-image results contain:
 
@@ -969,11 +973,16 @@ provides the same path resolution for library callers without executing jobs.
 
 #### Outputs, Failures, And Retries
 
-The batch root must be new or empty, even with `overwrite=True`/`--overwrite`.
-It must not contain any job's input image, mask, or PSF, including another
-job's input. These structural checks run for the whole batch before any
-processing or output creation. Empty batches are rejected. Use one distinct
-root per run; concurrent processes must not share an output root.
+The batch root must be new or empty unless `overwrite=True`/`--overwrite` is
+given, which clears the previous contents of that root before any job runs
+(the sole batch root exception; `--check-only` never clears it). Without the
+flag, an interactive terminal is asked to confirm the replacement before
+anything is deleted; `--yes` answers that prompt, and a non-interactive run
+without either flag fails instead. It must not
+contain any job's input image, mask, or PSF, including another job's input.
+These structural checks run for the whole batch before any processing or
+output creation. Empty batches are rejected. Use one distinct root per run;
+concurrent processes must not share an output root.
 
 ```text
 results/batch_001/
@@ -1165,7 +1174,8 @@ Run `--help` for the installed interface. Defaults below describe this version.
 | `--max-dipole-ratio` | `0.5` | Maximum significant opposite-sign neighbor/peak ratio. |
 | `--max-candidates` | `1000` | Fail rather than silently truncate an excessive candidate list. |
 | `--no-plots` | Off | Skip diagnostic PNGs. |
-| `--overwrite` | Off | Allow replacing existing single-pair products, never input data; batch roots must still be new/empty. |
+| `--overwrite` | Off | Allow replacing existing single-pair products, never input data; survey and `--batch` manifest results roots are cleared and reused, and interactive terminals are asked to confirm when the flag is omitted. |
+| `-y`, `--yes` | Off | Answer the survey/`--batch` results-root replacement prompt affirmatively, so scripted runs need no terminal and no `--overwrite`. Rejected without `--survey` or `--batch`. |
 | `--verbose` | Off | Include an exception traceback on failure. |
 | `--estimate-psf` | Off | Compatibility flag; both PSFs are always estimated or loaded and saved. |
 | `--inf-loss` | `0.15` | Retained ProperImage setting; not a tuning control for Gaussian PSF width. |
@@ -1263,7 +1273,7 @@ To see individual test names or investigate one behavior:
 & $Python -m pytest -c $Configuration $AstroTests -q -k properimage
 ```
 
-The current suite expands to 213 test cases, including parameterized invalid
+The current suite expands to 218 test cases, including parameterized invalid
 configuration and preflight checks. It covers:
 
 - Score calibration, preservation of bright sources, and invalid-pixel masks.

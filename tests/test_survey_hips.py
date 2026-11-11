@@ -332,6 +332,33 @@ def test_named_provider_skips_the_moc_coverage_precheck(tmp_path, monkeypatch):
     assert template.metadata["coverage_check"]["covered"] is None
 
 
+def test_survey_results_directory_is_replaced_only_with_overwrite(tmp_path, monkeypatch):
+    science, _ = science_image(tmp_path)
+    results = tmp_path / "results"
+    results.mkdir()
+    stale = results / "survey_reference.json"
+    stale.write_text("{}", encoding="utf-8")
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("stop before acquisition")
+
+    monkeypatch.setattr(survey, "fetch_survey_template", fail)
+    options = {
+        "template_filter": "r",
+        "cache_dir": tmp_path / "cache",
+        "template_units": "adu",
+        "check_moc_coverage": False,
+    }
+    with pytest.raises(FileExistsError, match="--overwrite"):
+        survey.compare_survey_images(science, results, **options)
+    assert stale.read_text(encoding="utf-8") == "{}"
+    with pytest.raises(RuntimeError, match="stop before acquisition"):
+        survey.compare_survey_images(science, results, config={"overwrite": True}, **options)
+    report = json.loads(stale.read_text(encoding="utf-8"))
+    assert report["state"] == "failed"
+    assert report["warnings"]
+
+
 def test_stc_polygon_keeps_longitudes_continuous_across_ra_zero(tmp_path):
     science, _ = science_image(tmp_path, crval=(0.01, 20.0))
     request = survey.prepare_template_request(
