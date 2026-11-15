@@ -162,7 +162,13 @@ Opt in to downloading a HiPS survey reference for a science FITS image with
 valid celestial WCS. The library asks the CDS `hips2fits` service for exactly
 the science WCS and shape, so the complete footprint arrives as one cutout on
 the science pixel grid. No local tiling or mosaic is built, and the comparison
-pipeline runs without a second reprojection. Choose the template filter
+pipeline runs without a second reprojection. If every CDS host fails, named
+providers fall back to a NASA SkyView DSS2 cutout (`r` → `dss2r`, `g` →
+`dss2b`, `i` → `dss2ir`), which is reprojected locally onto the science grid
+and flagged as a cross-filter reference. That fallback is acquisition-only: it
+is cached and reported, but the survey pipeline refuses photometric subtraction
+because DSS2 bandpasses and pixel units cannot supply a calibrated flux scale.
+Explicit HiPS identifiers are never substituted. Choose the template filter
 explicitly:
 
 ```powershell
@@ -173,9 +179,9 @@ proper-transient-finder --survey auto --science-list science.txt --template-filt
 
 `--survey` accepts `auto`, `panstarrs`, `skymapper`, or an explicit HiPS
 identifier such as `PanSTARRS/DR1/i`. Pan-STARRS uses dec >= -30 and supports
-`g r i z y`; SkyMapper DR4 uses dec <= 0 and publishes `g r i` HiPS maps. `auto`
-prefers Pan-STARRS where both are eligible. It never switches provider or
-filter after a failed request.
+`g r i z y`; SkyMapper DR4 uses dec <= 0 and publishes `g r i` HiPS maps.`auto` prefers Pan-STARRS where both are eligible. It never substitutes a
+different requested filter; the only outage fallback is the SkyView DSS2
+product described above.
 
 Other CDS HiPS maps can be selected by identifier with one explicit band label:
 
@@ -208,7 +214,9 @@ linearizes those values and masks non-finite pixels. No variance plane is
 invented. Cache-owned copies are labeled with the verified science count unit so
 that the pipeline can fit one global stellar flux scale. `--template-units`
 may declare that label explicitly, but it must match the science unit, and it
-does not calibrate or convert pixels. `--template-gain` sets the reference
+does not calibrate or convert pixels. When the science header omits `BUNIT`,
+declare it with `--science-units adu` or `--science-units electron`.
+`--template-gain` sets the reference
 electrons-per-count used by its background noise model. Science input needs
 declared count units and FILTER, or an explicit science filter override. No
 input FITS is edited.

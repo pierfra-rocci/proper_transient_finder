@@ -62,6 +62,7 @@ SURVEY_HOSTS = {
     "alaskybis.cds.unistra.fr",
     "alasky.u-strasbg.fr",
     "alaskybis.u-strasbg.fr",
+    "skyview.gsfc.nasa.gov",
 }
 HIPS_SERVICE_URLS = (
     "https://alaskybis.cds.unistra.fr/hips-image-services/hips2fits",
@@ -77,11 +78,33 @@ MOC_SERVICE_URLS = (
     "https://alasky.u-strasbg.fr/MocServer/query",
     "https://alasky.cds.unistra.fr/MocServer/query",
 )
+# NASA SkyView is used only when no CDS hips2fits host answers.  It cuts its own
+# FITS grid, so the fallback is reprojected locally onto the science WCS.
+SKYVIEW_SERVICE_URL = "https://skyview.gsfc.nasa.gov/cgi-bin/images"
+# SkyView survey substituted per requested optical band.  DSS2 is photographic
+# and covers the whole sky, but it is a different bandpass from the requested
+# HiPS product, so a fallback is always compared as a cross-filter reference.
+SKYVIEW_SURVEYS = {"g": "dss2b", "r": "dss2r", "i": "dss2ir"}
+SKYVIEW_NATIVE_SCALE_ARCSEC = 1.0
+SKYVIEW_MAX_PIXELS = 4_000_000
 SURVEY_WARNING = (
     "HiPS survey templates are coadded, resampled products rather than original "
     "detector counts. Flux scales, bandpasses and noise are approximate, and "
     "candidates require independent confirmation."
 )
+SKYVIEW_ACQUISITION_ONLY_WARNING = (
+    "NASA SkyView fallback products are acquisition-only: their DSS2 bandpass and "
+    "pixel units cannot support a photometric flux scale, so the survey pipeline "
+    "stops after acquisition."
+)
+
+
+class FallbackAcquisitionOnlyError(ValueError):
+    """Raised after a SkyView fallback is cached but subtraction is refused."""
+
+    state = "acquisition_only"
+
+
 DEFAULT_MAX_DOWNLOAD_MB = 512
 _GRID_TOLERANCE_DEG = 1e-5
 _BAND_TOKEN = re.compile(r"[A-Za-z]\d?")
@@ -362,6 +385,77 @@ def _download_hips(request: TemplateRequest, timeout: float, limit: int) -> tupl
     raise URLError("HiPS download failed for every service host: " + "; ".join(failures))
 
 
+def _skyview_survey(request: TemplateRequest) -> str | None:
+    """Return the SkyView survey substituted when no CDS cutout host answers.
+
+    Only named providers are substituted.  An explicit HiPS identifier pins one
+    published product, so it is never silently replaced by a different survey.
+    """
+    if "/" in request.survey:
+        return None
+    return SKYVIEW_SURVEYS.get(request.template_filter)
+
+
+def _skyview_url(request: TemplateRequest, wcs: WCS) -> tuple[str, str]:
+    """Return the SkyView cutout URL and survey name for a named provider."""
+    survey_name = _skyview_survey(request)
+    if survey_name is None:
+        raise ValueError("Requested survey/band has no SkyView fallback product")
+    scales = wcs.proj_plane_pixel_scales()
+    pixel_scale = max(
+        max(float(scale.to_value("deg")) for scale in scales) * 3600.0,
+        SKYVIEW_NATIVE_SCALE_ARCSEC,
+    )
+    pixels = int(np.ceil(request.size_deg * 3600.0 / pixel_scale))
+    pixels = min(max(pixels, 32), int(np.sqrt(SKYVIEW_MAX_PIXELS)))
+    parameters = {
+        "Survey": survey_name,
+        "Position": f"{request.ra_deg:.8f},{request.dec_deg:.8f}",
+        "Size": f"{request.size_deg:.8f}",
+        "Pixels": str(pixels),
+        "Projection": "Tan",
+        "Coordinates": "J2000",
+        "Return": "FITS",
+    }
+    return SKYVIEW_SERVICE_URL + "?" + urlencode(parameters), survey_name
+
+
+def _download_skyview(
+    request: TemplateRequest, wcs: WCS, timeout: float, limit: int
+) -> tuple[bytes, str, str]:
+    """Fetch a SkyView fallback cutout after every CDS hips2fits host failed."""
+    url, survey_name = _skyview_url(request, wcs)
+    failures = []
+    for attempt in range(SERVICE_ATTEMPTS):
+        if attempt:
+            sleep(HIPS_RETRY_DELAY_SECONDS)
+        try:
+            return _download_url(url, timeout, limit), url, survey_name
+        except OSError as error:
+            failures.append(f"{urlsplit(url).hostname}: {error}")
+    raise URLError("NASA SkyView fallback failed: " + "; ".join(failures))
+
+
+def _reproject_skyview(
+    data: np.ndarray, header: fits.Header, science_wcs: WCS, shape: tuple[int, int]
+) -> np.ndarray:
+    """Reproject a SkyView cutout onto the science grid and mask blank pixels."""
+    from reproject import reproject_interp
+
+    cutout_wcs = WCS(header)
+    if cutout_wcs.pixel_n_dim != 2 or not cutout_wcs.has_celestial:
+        raise ValueError("SkyView fallback cutout has no usable two-dimensional celestial WCS")
+    if data.ndim != 2:
+        raise ValueError("SkyView fallback cutout is not a two-dimensional image")
+    projected, footprint = reproject_interp(
+        (data, cutout_wcs.celestial), science_wcs, shape_out=shape
+    )
+    projected = np.asarray(projected, dtype=float)
+    # SkyView writes zero into pixels it has no data for.
+    covered = (np.asarray(footprint) > 0) & (projected != 0)
+    return np.where(covered, projected, np.nan)
+
+
 def _stc_polygon(wcs: WCS, shape: tuple[int, int], samples: int = 33) -> str:
     """Return the science footprint as a closed ICRS STC-S polygon."""
     height, width = shape
@@ -505,6 +599,12 @@ def _cached_template(path: Path, manifest: Path) -> SurveyTemplate | None:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     if digest != metadata.get("sha256"):
         raise ValueError("Cached survey FITS checksum mismatch; use a fresh cache directory")
+    # Manifests written before the fallback rule existed do not carry these
+    # flags; derive them from the recorded backend so an old SkyView cache
+    # cannot slip into photometric subtraction.
+    is_fallback = metadata.get("backend") == "nasa-skyview" or metadata.get("fallback") is not None
+    metadata["acquisition_only"] = is_fallback
+    metadata["photometric_subtraction_allowed"] = not is_fallback
     return SurveyTemplate(path, metadata)
 
 
@@ -573,17 +673,40 @@ def fetch_survey_template(
             "or a local reference."
         )
     limit = int(max_download_mb * 1_000_000)
-    payload, query_url, hips_id = _download_hips(request, timeout, limit)
+    fallback = None
+    try:
+        payload, query_url, hips_id = _download_hips(request, timeout, limit)
+        service = "CDS hips2fits"
+    except OSError as hips_error:
+        if _skyview_survey(request) is None:
+            raise
+        try:
+            payload, query_url, survey_name = _download_skyview(
+                request, science_wcs, timeout, limit
+            )
+        except OSError as fallback_error:
+            raise URLError(
+                f"{hips_error}; the NASA SkyView fallback also failed: {fallback_error}"
+            ) from fallback_error
+        fallback = {
+            "survey": survey_name,
+            "reason": "CDS hips2fits hosts did not respond",
+            "reprojected": True,
+        }
+        service = "NASA SkyView"
     data, header = _fits_image(payload)
-    if data.shape != shape:
+    if fallback is not None:
+        data = _reproject_skyview(data, header, science_wcs, shape)
+    elif data.shape != shape:
         raise ValueError(
             f"Downloaded HiPS template shape {data.shape} does not match the science grid {shape}"
         )
-    if not _grid_matches(header, science_wcs, shape):
+    elif not _grid_matches(header, science_wcs, shape):
         raise ValueError("Downloaded HiPS template does not match the science pixel grid")
     native_filter = str(header.get("FILTER", "")).strip()
     native_bunit = str(header.get("BUNIT", "")).strip()
-    asinh = _uses_asinh(hips_id)
+    delivered_band = fallback["survey"] if fallback is not None else request.template_filter
+    asinh = fallback is None and _uses_asinh(hips_id)
     if asinh:
         data = _linearize_asinh(data)
     valid = np.isfinite(data)
@@ -602,16 +725,30 @@ def fetch_survey_template(
         header.pop(keyword, None)
     header.update(science_wcs.to_header(relax=True))
     header["NAXIS1"], header["NAXIS2"] = shape[1], shape[0]
-    header["FILTER"] = request.template_filter
+    header["FILTER"] = delivered_band
     header["BUNIT"] = "relative-flux"
-    header["HIPS"] = (hips_id, "HiPS template identifier")
+    header["HIPS"] = (hips_id, "Requested HiPS template identifier")
     header["HIPSASIN"] = (asinh, "Pan-STARRS asinh values were linearized")
-    header.add_history("HiPS template projected onto the science pixel grid by CDS hips2fits.")
+    if fallback is not None:
+        header["SKYSURV"] = (fallback["survey"], "SkyView fallback survey")
+        header.add_history("NASA SkyView fallback cutout reprojected onto the science pixel grid.")
+    else:
+        header.add_history("HiPS template projected onto the science pixel grid by CDS hips2fits.")
     warnings = [
         SURVEY_WARNING,
         "HiPS products have no variance plane; noise is estimated from the image background.",
         "Template chronology is not certified; a HiPS coadd may include the science epoch.",
     ]
+    if fallback is not None:
+        warnings += [
+            f"CDS hips2fits did not respond; the template is a NASA SkyView "
+            f"{fallback['survey']} cutout instead of {hips_id}.",
+            "The SkyView fallback is a different survey and bandpass from the requested "
+            "HiPS; it was reprojected onto the science grid and is compared as a "
+            "cross-filter reference with only approximate flux scales.",
+            "Blank SkyView pixels were masked before PSF matching.",
+            SKYVIEW_ACQUISITION_ONLY_WARNING,
+        ]
     if asinh:
         warnings.append(
             "Pan-STARRS HiPS values were linearized from asinh scaling; the flux zero point "
@@ -628,19 +765,29 @@ def fetch_survey_template(
             "CDS MOC coverage pre-check was explicitly disabled; HiPS coverage was not "
             "verified before download."
         )
-    if not native_filter:
+    if fallback is not None:
+        warnings.append(
+            "The SkyView cutout does not declare FILTER; the fallback survey name is used "
+            "as the band label."
+        )
+    elif not native_filter:
         warnings.append(
             "The HiPS header does not declare FILTER; the requested band label was applied."
         )
     metadata = {
         **identity,
         "query_url": query_url,
-        "service": "CDS hips2fits",
+        "service": service,
+        "backend": "nasa-skyview" if fallback is not None else "cds-hips2fits",
         "image_id": hips_id,
-        "product": "hips",
+        "product": "skyview-cutout" if fallback is not None else "hips",
+        "fallback": fallback,
+        "acquisition_only": fallback is not None,
+        "photometric_subtraction_allowed": fallback is None,
+        "delivered_band": delivered_band,
         "mjd": None,
         "reference_mjd": None,
-        "native_reference_filter": native_filter or request.template_filter,
+        "native_reference_filter": native_filter or delivered_band,
         "native_bunit": native_bunit,
         "asinh_linearized": asinh,
         "shape": [shape[0], shape[1]],
@@ -668,6 +815,23 @@ def _count_unit(value: str) -> str:
         "Survey workflow requires declared detector-count units (adu or electron); "
         "calibrate other science or template units first."
     )
+
+
+def _science_unit(header: fits.Header, declared: str | None) -> str:
+    """Resolve the science count unit from the header or an explicit declaration."""
+    header_label = str(header.get("BUNIT", "")).strip()
+    if declared is None:
+        try:
+            return _count_unit(header_label)
+        except ValueError as error:
+            raise ValueError(
+                "The science FITS header does not declare detector-count units; pass "
+                "science_units (--science-units adu|electron) to declare them"
+            ) from error
+    unit = _count_unit(declared)
+    if header_label and _count_unit(header_label) != unit:
+        raise ValueError("Declared science units disagree with the science header BUNIT")
+    return unit
 
 
 def _normalized_copy(
@@ -710,8 +874,8 @@ def _survey_options(
     from .astro import PipelineConfig
 
     options = PipelineConfig(**_config_values(config))
-    if options.method != "kernel" or options.align or options.shift:
-        raise ValueError("Survey reference workflow requires the kernel method, not align/shift")
+    if options.method != "kernel":
+        raise ValueError("Survey reference workflow requires the kernel method")
     if template_gain is not None and (not np.isfinite(template_gain) or template_gain <= 0):
         raise ValueError("Template gain must be finite and positive")
     if not np.isfinite(threshold_sigma) or threshold_sigma <= 0:
@@ -736,6 +900,7 @@ def compare_survey_images(
     cache_dir: str | Path = "survey_cache",
     config: PipelineConfig | Mapping[str, Any] | None = None,
     science_filter: str | None = None,
+    science_units: str | None = None,
     template_units: str | None = None,
     template_gain: float | None = None,
     timeout: float = 30,
@@ -752,11 +917,16 @@ def compare_survey_images(
     availability, calibration, overlap or detectability.  HiPS pixels are not
     original detector counts: cache-owned copies are labeled with the verified
     science count unit so the pipeline can fit one global stellar flux scale.
-    Input FITS files are never edited.
+    ``science_units`` may declare that unit when the science header omits BUNIT;
+    it never converts pixels.  Input FITS files are never edited.  A NASA SkyView
+    fallback is acquisition-only: it is cached and reported, then rejected with
+    ``FallbackAcquisitionOnlyError`` instead of being subtracted.
     """
     from .api import _config_values, compare_images
     from .astro import atomic_json
 
+    if science_units is not None:
+        _count_unit(science_units)
     options = _survey_options(
         config,
         template_units,
@@ -822,10 +992,25 @@ def compare_survey_images(
             reference_fits=str(template.fits_path),
             warnings=template.metadata["warnings"],
         )
+        reference_band = template.metadata.get("delivered_band") or request.template_filter
+        cross_filter = request.science_filter.casefold() != str(reference_band).casefold()
+        values.update(
+            comparison_mode="experimental cross-filter" if cross_filter else "same-band",
+            delivered_band=reference_band,
+        )
+        if template.metadata.get("acquisition_only"):
+            raise FallbackAcquisitionOnlyError(
+                f"Acquired a NASA SkyView {reference_band} cutout at {template.fits_path}, "
+                "but SkyView fallbacks are acquisition-only and cannot be used for "
+                "photometric subtraction: the DSS2 bandpass and pixel units do not "
+                "support a calibrated flux scale. The cutout is kept in the cache for "
+                "inspection; use a same-band HiPS template or a local reference for "
+                "subtraction."
+            )
         with fits.open(request.science_fits, memmap=False) as hdus:
             header = hdus[0].header.copy()
             header.update(_science_hdu(hdus).header)
-        science_unit = _count_unit(header.get("BUNIT", ""))
+        science_unit = _science_unit(header, science_units)
         reference_unit = science_unit if template_units is None else _count_unit(template_units)
         if science_unit != reference_unit:
             raise ValueError(
@@ -868,7 +1053,7 @@ def compare_survey_images(
         _normalized_copy(
             template.fits_path,
             prepared_reference,
-            request.template_filter,
+            reference_band,
             reference_unit,
             reference_gain,
         )
@@ -898,7 +1083,8 @@ def compare_survey_images(
         atomic_json(report_path, {**values, "state": "completed"})
         return result
     except Exception as error:
-        atomic_json(report_path, {**values, "state": "failed", "error": str(error)})
+        state = getattr(error, "state", "failed")
+        atomic_json(report_path, {**values, "state": state, "error": str(error)})
         if options.plots:
             _failure_diagnostic(values, root / "survey_diagnostic.png", error)
         raise
@@ -1051,8 +1237,14 @@ def compare_survey_batch(
     from .astro import atomic_json
 
     settings = _survey_options(
-        **{key: value for key, value in options.items() if key != "science_filter"}
+        **{
+            key: value
+            for key, value in options.items()
+            if key not in {"science_filter", "science_units"}
+        }
     )
+    if options.get("science_units") is not None:
+        _count_unit(options["science_units"])
     if isinstance(science_images, (str, Path)):
         raise ValueError("Pass a list of science images, not a single path")
     images = [Path(path).expanduser().resolve() for path in science_images]
@@ -1085,9 +1277,21 @@ def compare_survey_batch(
     ]
     if not check_only:
         root.mkdir(parents=True, exist_ok=True)
+    acquisition_only: list[dict] = []
 
     def report(state):
-        result = BatchResult(tuple(items), state, root, check_only)
+        result = BatchResult(
+            tuple(items),
+            state,
+            root,
+            check_only,
+            survey_status=None
+            if check_only
+            else {
+                "acquisition_only_count": len(acquisition_only),
+                "acquisition_only": list(acquisition_only),
+            },
+        )
         if not check_only:
             atomic_json(root / "batch_summary.json", result.to_dict())
         return result
@@ -1120,9 +1324,10 @@ def compare_survey_batch(
                 )
                 del result
             except Exception as error:
+                acquisition_only_error = isinstance(error, FallbackAcquisitionOnlyError)
                 items[index] = replace(
                     item,
-                    state="failed",
+                    state="acquisition_only" if acquisition_only_error else "failed",
                     error=str(error),
                     error_type=type(error).__name__,
                     elapsed_seconds=perf_counter() - started,
@@ -1140,9 +1345,22 @@ def compare_survey_batch(
                     }
                     if not report_path.exists():
                         atomic_json(report_path, details)
+                    details = json.loads(report_path.read_text(encoding="utf-8"))
+                    if acquisition_only_error:
+                        reference_fits = details.get("reference_fits")
+                        acquisition_only.append(
+                            {
+                                "name": items[index].name,
+                                "science_fits": str(items[index].science_fits),
+                                "delivered_band": details.get("delivered_band"),
+                                "reference_fits": reference_fits,
+                            }
+                        )
+                        items[index] = replace(
+                            items[index],
+                            reference_fits=Path(reference_fits) if reference_fits else None,
+                        )
                     if settings.plots and not (item.output_dir / "survey_diagnostic.png").exists():
-                        if report_path.exists():
-                            details = json.loads(report_path.read_text(encoding="utf-8"))
                         _failure_diagnostic(
                             details, item.output_dir / "survey_diagnostic.png", error
                         )
@@ -1161,7 +1379,7 @@ def compare_survey_batch(
         raise
     return report(
         "completed_with_errors"
-        if any(item.state == "failed" for item in items)
+        if any(item.state in {"failed", "acquisition_only"} for item in items)
         else "checked"
         if check_only
         else "completed"

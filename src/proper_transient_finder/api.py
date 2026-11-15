@@ -87,12 +87,17 @@ class BatchItemResult:
 
 @dataclass(frozen=True)
 class BatchResult:
-    """Ordered job records, including failures/skips; success is not scientific confirmation."""
+    """Ordered job records, including failures/skips; success is not scientific confirmation.
+
+    ``survey_status`` is set by survey batches and lists acquisition-only
+    fallback templates that were cached but never subtracted.
+    """
 
     items: tuple[BatchItemResult, ...]
     state: str
     output_dir: Path | None
     check_only: bool = False
+    survey_status: dict | None = None
 
     @property
     def successful(self) -> bool:
@@ -106,6 +111,7 @@ class BatchResult:
             "state": self.state,
             "successful": self.successful,
             "check_only": self.check_only,
+            "survey_status": self.survey_status,
             "output_dir": str(self.output_dir) if self.output_dir is not None else None,
             "counts": {
                 state: sum(item.state == state for item in self.items)
@@ -115,6 +121,7 @@ class BatchResult:
                     "completed",
                     "checked",
                     "failed",
+                    "acquisition_only",
                     "skipped",
                     "interrupted",
                 )

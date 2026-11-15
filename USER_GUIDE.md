@@ -460,18 +460,29 @@ transfer cap (`--max-download-mb`, default 512 MB, maximum 512 MB). Large
 frames that exceed it must be cropped or split upstream; the survey mode does
 not assemble mosaics.
 
+When every CDS host fails, named providers fall back to NASA SkyView DSS2
+(`r` → `dss2r`, `g` → `dss2b`, `i` → `dss2ir`). SkyView cuts its own tangent
+grid, so that fallback is reprojected locally onto the science grid and is
+always reported as a cross-filter reference with approximate flux. It is
+**acquisition-only**: the cutout is cached and reported, but the survey
+pipeline refuses photometric subtraction because DSS2 pixel units and bandpass
+cannot supply a calibrated flux scale. `fetch_survey_template` still returns
+the cutout for inspection. Explicit HiPS identifiers and other bands are never
+substituted; they fail instead.
+
 `--survey` accepts `auto`, `panstarrs`, `skymapper`, or an explicit HiPS
 identifier such as `PanSTARRS/DR1/i`. `auto` prefers Pan-STARRS where both
 selected-coverage providers are eligible. It chooses using nominal coverage and
 the **requested template band**, not science-filter inference. It does not
-switch providers or substitute filters after a service failure. Nominal
-coverage is not a guarantee of usable pixels.
+substitute a different requested filter after a service failure; the only
+outage fallback is the SkyView DSS2 product described above. Nominal coverage
+is not a guarantee of usable pixels.
 
 Science FITS selection matches the ordinary pipeline: one `SCI` extension wins,
 otherwise exactly one usable image plane is required; primary and science
-headers are merged. Supply accurate 2D celestial WCS, count-space BUNIT and
-FILTER, with gain/variance and sufficient usable stars as for any other
-comparison. Missing FILTER requires `--science-filter`. Multi-detector or
+headers are merged. Supply accurate 2D celestial WCS, count-space BUNIT (or
+declare it once with `--science-units adu|electron`) and FILTER, with
+gain/variance and sufficient usable stars as for any other comparison. Missing FILTER requires `--science-filter`. Multi-detector or
 ambiguous images must be split first. This workflow does not plate-solve or
 calibrate the science exposure.
 
@@ -535,6 +546,9 @@ counts, and they have no variance plane. The workflow is explicit about that:
   `--template-units adu` or `--template-units electron` may be supplied only to
   declare that label explicitly; it must match the science unit and never
   converts pixels.
+- If the science header omits `BUNIT`, `--science-units adu` or
+  `--science-units electron` declares its count unit. It must agree with any
+  declared `BUNIT`, labels cache-owned copies only, and never converts pixels.
 - `--template-gain` sets the reference electrons-per-count used by the
   background noise model. It does not calibrate the survey.
 - Chronology is not certified. A HiPS coadd may include the science epoch, so a
@@ -543,7 +557,10 @@ counts, and they have no variance plane. The workflow is explicit about that:
 
 The reference is delivered on the science grid, so the pipeline does **not**
 reproject it a second time. The workflow requires the kernel method and rejects
-`--align`, `--shift`, and ProperImage subtraction.
+ProperImage subtraction. `--align` and `--shift` are accepted so the science
+frame can be registered onto a fallback template whose survey astrometry
+differs; the reference is never resampled again. `--alignment-tolerance` still
+bounds the measured registration residual, which the run records.
 
 Matching normalized band labels choose same-band comparison; differing labels
 automatically choose the existing experimental cross-filter mode. Common
@@ -578,6 +595,22 @@ Or use `science.json` containing an array of strings:
 ```powershell
 & $Python $PipelineScript --survey auto --science-list science.txt --template-filter g --template-units adu --output "C:\results\survey_batch"
 ```
+
+If every CDS host fails and a named provider falls back to NASA SkyView, the
+template is cached but never subtracted. The CLI ends the run with that table
+and a totals line:
+
+```text
+Survey batch completed_with_errors. Results: C:\results\survey_batch
+Acquisition-only templates (1); no photometric subtraction.
+NAME          BAND   CACHED FITS
+science-0002  dss2r  C:\results\survey_cache\a7aa152d...hips.fits
+Batch totals: completed=1, failed=0, acquisition_only=1
+```
+
+Each row names the job, delivered fallback band and cached FITS; `-` marks a
+missing value. Skipped and interrupted jobs appear in the totals only when
+nonzero.
 
 `--science-list` is distinct from `--batch` and mutually exclusive with `--new`.
 Survey mode forbids an explicit `--ref` or pair manifest. Sequential jobs get portable
@@ -617,8 +650,8 @@ report = compare_survey_batch(
 ```
 
 `compare_survey_images` returns `PipelineResult`, or a JSON-compatible local planning
-report with `check_only=True`. `compare_survey_batch` returns `BatchResult`. Shared
-options include `config`, `science_filter`, `template_units`, `template_gain`,
+report with `check_only=True`. `compare_survey_batch` returns `BatchResult`.Shared options include `config`, `science_filter`, `science_units`, `template_units`,
+`template_gain`,
 `timeout`, `max_download_mb` and `threshold_sigma`. See the generated
 [API reference](docs/API.md) for signatures and request/template fields.
 
@@ -628,10 +661,14 @@ Only the science WCS, image dimensions, HiPS identifier, template band and
 optional science epoch are sent over HTTPS to the CDS HiPS services. Each
 request tries `alaskybis.cds.unistra.fr`, then `alasky.u-strasbg.fr`, then
 `alasky.cds.unistra.fr`, and retries that sequence up to three times, pausing
-briefly between cycles, before reporting failure. The MOC coverage pre-check uses the same three-host order
-and retry sequence. Science pixels and local paths are not uploaded. Requests
-and redirects are restricted to these hosts (plus the other `alasky` mirrors);
-TLS verification stays enabled. The default network
+briefly between cycles, before trying the NASA SkyView fallback for named
+providers and reporting failure. The fallback sends only the field center,
+polygon circumference and requested optical band to
+`skyview.gsfc.nasa.gov`. The MOC coverage pre-check uses the same three-host
+order and retry sequence and never applies to the fallback. Science pixels and
+local paths are not uploaded. Requests and redirects are restricted to these
+hosts (plus the other `alasky` mirrors and `skyview.gsfc.nasa.gov`); TLS
+verification stays enabled. The default network
 socket timeout is 30 seconds; FITS responses are limited to 512 MB by default,
 and the configurable maximum is also 512 MB. The timeout is not a total-run
 deadline, and the response-size limit is not a full-run memory bound.
@@ -679,7 +716,9 @@ Single-image results contain:
   record.
 
 Survey batches place these under each generated job directory and add an atomic
-`batch_summary.json` at their root. Once processing has started, failures produce
+`batch_summary.json` at their root; its `survey_status` block lists any
+acquisition-only SkyView templates by job name, band and cached FITS path, and
+the CLI prints the same table followed by a `Batch totals` line. Once processing has started, failures produce
 an explicitly labeled failure diagnostic, not a fabricated blank subtraction.
 Invalid shared options fail before writes; missing/bad per-image inputs are
 recorded as batch failures. `--no-plots` disables PNGs. `--check-only` creates no
@@ -922,7 +961,9 @@ name, resolved input/output paths, state, accepted/rejected counts (or `None`
 when unavailable), elapsed seconds, error type/message, optional full `result`,
 and optional input-only `preflight` report. `successful` is true only when
 every job completed or every requested input check passed. `check_only`
-distinguishes preflight reports from actual image processing.
+distinguishes preflight reports from actual image processing. Survey batches
+also set `survey_status`, which lists acquisition-only fallback templates
+(count, job name, delivered band, cached FITS) that were never subtracted.
 
 For no-write analysis, omit `output_dir`:
 
@@ -1009,7 +1050,7 @@ results/batch_001/
 The atomic summary includes UTC start/update timestamps, resolved paths,
 counts, durations, error details, and ordered job records, but no image arrays
 or tables. It is updated before/after each job. Job states are `pending`,
-`running`, `completed`, `checked`, `failed`, `skipped`, or `interrupted`.
+`running`, `completed`, `checked`, `acquisition_only`, `failed`, `skipped`, or `interrupted`.
 Batch states are `running`, `completed`, `completed_with_errors`, `checked`,
 `stopped` (fail-fast), or `interrupted`. Normal persisted per-job logs and
 provenance retain the underlying science configuration, input fingerprints,
@@ -1150,6 +1191,7 @@ Run `--help` for the installed interface. Defaults below describe this version.
 | `--science-filter` | FITS FILTER | Verified science label override for local, batch, or survey comparisons; original FITS is unchanged. |
 | `--template-cache` | `survey_cache` | Survey FITS/manifests and normalized copies, separate from results. |
 | `--template-units` | Science BUNIT | Optional verified `adu` or `electron` label for cache copies; must match the science unit; no conversion. |
+| `--science-units` | FITS `BUNIT` | Declares the science count unit when the header omits `BUNIT`; must agree with a declared value; no conversion. |
 | `--template-gain` | `1` | Reference electrons per HiPS count used by its background noise model. |
 | `--survey-timeout` | `30` | Positive finite HTTPS timeout in seconds per response. |
 | `--max-download-mb` | `512` | HiPS FITS transfer limit per response, above zero and at most 512 MB. |
@@ -1178,6 +1220,7 @@ Run `--help` for the installed interface. Defaults below describe this version.
 | `--no-beta` | Off | Disable photometric scale estimation. Kernel scale is one unless manually supplied. |
 | `--iterative` | Off | More ratio-clipping iterations for kernel; iterative estimation for ProperImage. |
 | `--psf-radius` | `8` | Input PSF kernel radius in pixels; support is `(2r+1)` squared. Automatic Gaussian PSFs must fit their 4σ support within `r + 1` pixels. |
+| `--ref-psf-radius`, `--new-psf-radius` | `--psf-radius` | Per-frame stamp radius for pairs whose sampling or seeing differs, such as a survey template and a finer science grid. Each automatic PSF gets its own 4σ support guard. |
 | `--ref-psf`, `--new-psf` | Estimated Gaussian PSFs | Both supplied PSFs are required together; kernel backend only. |
 | `--ref-mask`, `--new-mask` | None | Additional same-shape input quality masks. |
 | `--no-cosmic-rays` | Off | Disable the pipeline's preprocessing L.A.Cosmic step. ProperImage can still run its own internal cleaning. |
@@ -1288,7 +1331,7 @@ To see individual test names or investigate one behavior:
 & $Python -m pytest -c $Configuration $AstroTests -q -k properimage
 ```
 
-The current suite expands to 223 test cases, including parameterized invalid
+The current suite expands to 243 test cases, including parameterized invalid
 configuration and preflight checks. It covers:
 
 - Score calibration, preservation of bright sources, and invalid-pixel masks.
@@ -1616,8 +1659,11 @@ Both runs used `PipelineConfig(plots=False)` on one clean scene and one noise
 seed, so this is not a rerun of the 40-case campaign; the detector, trail and
 masked scenes still need their own automatic-PSF pass. The support guard remains
 in force: an automatic Gaussian must fit its 4σ support within one pixel of the
-stamp radius, so a genuinely broad PSF must raise `--psf-radius` rather than be
-cropped, and supplied measured PSFs remain the preferred option for real data.
+stamp radius, so a genuinely broad PSF must raise `--psf-radius` (or the
+frame-specific `--ref-psf-radius` / `--new-psf-radius`) rather than be cropped,
+and supplied measured PSFs remain the preferred option for real data. The
+per-frame radii exist for cross-resolution pairs, where one shared radius cannot
+fit both PSFs; they do not relax the support or sampling guards.
 
 **Known-PSF control:** all 40 cases completed. Median/range across all 20 cases
 at each size (null and injected scenes mixed):

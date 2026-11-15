@@ -97,7 +97,7 @@ checksum-verified JSON manifest.
 ## compare_survey_images
 
 ```python
-compare_survey_images(science_fits: str | Path, output_dir: str | Path, *, template_filter: str, survey: str='auto', cache_dir: str | Path='survey_cache', config: PipelineConfig | Mapping[str, Any] | None=None, science_filter: str | None=None, template_units: str | None=None, template_gain: float | None=None, timeout: float=30, max_download_mb: float=DEFAULT_MAX_DOWNLOAD_MB, check_moc_coverage: bool=True, threshold_sigma: float=5, check_only: bool=False) -> PipelineResult | dict
+compare_survey_images(science_fits: str | Path, output_dir: str | Path, *, template_filter: str, survey: str='auto', cache_dir: str | Path='survey_cache', config: PipelineConfig | Mapping[str, Any] | None=None, science_filter: str | None=None, science_units: str | None=None, template_units: str | None=None, template_gain: float | None=None, timeout: float=30, max_download_mb: float=DEFAULT_MAX_DOWNLOAD_MB, check_moc_coverage: bool=True, threshold_sigma: float=5, check_only: bool=False) -> PipelineResult | dict
 ```
 
 Acquire a HiPS template and call the unchanged comparison API.
@@ -108,7 +108,10 @@ WCS/options without downloads or writes; it does not certify service
 availability, calibration, overlap or detectability.  HiPS pixels are not
 original detector counts: cache-owned copies are labeled with the verified
 science count unit so the pipeline can fit one global stellar flux scale.
-Input FITS files are never edited.
+`science_units` may declare that unit when the science header omits BUNIT;
+it never converts pixels.  Input FITS files are never edited.  A NASA SkyView
+fallback is acquisition-only: it is cached and reported, then rejected with
+`FallbackAcquisitionOnlyError` instead of being subtracted.
 
 ## compare_survey_batch
 
@@ -117,6 +120,10 @@ compare_survey_batch(science_images: Iterable[str | Path], output_dir: str | Pat
 ```
 
 Sequential HiPS survey comparisons with existing lightweight batch result types.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `acquisition_only` | `list[dict]` | `[]` |
 
 ## load_science_list
 
@@ -194,12 +201,16 @@ Per-job status; full image results are optional to bound batch memory usage.
 
 Ordered job records, including failures/skips; success is not scientific confirmation.
 
+`survey_status` is set by survey batches and lists acquisition-only
+fallback templates that were cached but never subtracted.
+
 | Field | Type | Default |
 | --- | --- | --- |
 | `items` | `tuple[BatchItemResult, ...]` | `required` |
 | `state` | `str` | `required` |
 | `output_dir` | `Path \| None` | `required` |
 | `check_only` | `bool` | `False` |
+| `survey_status` | `dict \| None` | `None` |
 
 ## PipelineConfig
 
@@ -221,6 +232,8 @@ Explicit assumptions and conservative candidate-selection defaults.
 | `saturation` | `float \| None` | `None` |
 | `cosmic_rays` | `bool` | `True` |
 | `psf_radius` | `int` | `8` |
+| `ref_psf_radius` | `int \| None` | `None` |
+| `new_psf_radius` | `int \| None` | `None` |
 | `min_stars` | `int` | `6` |
 | `alignment_tolerance` | `float` | `0.35` |
 | `flux_scale` | `float \| None` | `None` |

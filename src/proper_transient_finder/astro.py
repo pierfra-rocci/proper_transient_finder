@@ -590,6 +590,8 @@ class PipelineConfig:
     saturation: float | None = None
     cosmic_rays: bool = True
     psf_radius: int = 8
+    ref_psf_radius: int | None = None
+    new_psf_radius: int | None = None
     min_stars: int = 6
     alignment_tolerance: float = 0.35
     flux_scale: float | None = None
@@ -671,6 +673,12 @@ class PipelineConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
                 raise ValueError(f"{name} must be an integer >= {minimum}")
+        for name in ("ref_psf_radius", "new_psf_radius"):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 3
+            ):
+                raise ValueError(f"{name} must be an integer >= 3 when given")
         if not 0 < self.inf_loss < 1:
             raise ValueError("Information loss must be between 0 and 1, exclusively")
         if not 0 < self.min_psf_correlation <= 1:
@@ -687,6 +695,20 @@ class PipelineConfig:
             raise ValueError("Provide both --ref-psf and --new-psf, or neither")
         if self.method == "proper" and (self.ref_psf or self.flux_scale is not None):
             raise ValueError("External PSFs and manual flux scale require --method kernel")
+        if self.method == "proper" and (
+            self.ref_psf_radius is not None or self.new_psf_radius is not None
+        ):
+            raise ValueError("Per-frame PSF radii require --method kernel")
+
+    @property
+    def reference_psf_radius(self) -> int:
+        """Reference-frame stamp radius, falling back to the shared radius."""
+        return self.psf_radius if self.ref_psf_radius is None else self.ref_psf_radius
+
+    @property
+    def science_psf_radius(self) -> int:
+        """Science-frame stamp radius, falling back to the shared radius."""
+        return self.psf_radius if self.new_psf_radius is None else self.new_psf_radius
 
 
 def star_catalog(frame: ImageFrame) -> np.ndarray:
@@ -864,9 +886,12 @@ class ProperTransientFinder:
         elif not (self.options.align or self.options.shift):
             if self.reference.data.shape != self.new.data.shape:
                 raise ValueError("Image grids differ; use --align or --reproject")
-        for supplied in (self.options.ref_psf, self.options.new_psf):
+        for supplied, radius in (
+            (self.options.ref_psf, self.options.reference_psf_radius),
+            (self.options.new_psf, self.options.science_psf_radius),
+        ):
             if supplied:
-                normalize_psf(fits.getdata(supplied, memmap=False), self.options.psf_radius)
+                normalize_psf(fits.getdata(supplied, memmap=False), radius)
         report = {
             "status": "input_checks_passed",
             "output_written": False,
@@ -1067,9 +1092,11 @@ class ProperTransientFinder:
         self.metadata["registration_matrix"] = transform.params.tolist()
         LOGGER.warning("Registered-image noise is correlated; score calibration is empirical")
 
-    def _estimate_psf(self, frame: ImageFrame, supplied: str | None) -> np.ndarray:
+    def _estimate_psf(
+        self, frame: ImageFrame, supplied: str | None, radius: int, radius_option: str
+    ) -> np.ndarray:
         if supplied:
-            return normalize_psf(fits.getdata(supplied, memmap=False), self.options.psf_radius)
+            return normalize_psf(fits.getdata(supplied, memmap=False), radius)
         from properimage.single_image import SingleImageGaussPSF
 
         catalog = star_catalog(frame)
@@ -1085,7 +1112,7 @@ class ProperTransientFinder:
             gain=frame.gain,
             min_sources=self.options.min_stars,
             strict_star_pick=False,
-            stamp_shape=(2 * self.options.psf_radius + 1,) * 2,
+            stamp_shape=(2 * radius + 1,) * 2,
             smooth_psf=self.options.smooth_psf,
         ) as image:
             # ProperImage's own strict selection silently keeps every detected
@@ -1101,7 +1128,6 @@ class ProperTransientFinder:
                     f"require >= {self.options.min_stars}"
                 )
             model = basis[1]
-            radius = self.options.psf_radius
             row, column = np.mgrid[-radius : radius + 1, -radius : radius + 1]
             psf = model(column, row)
             # Four sigma is the support target, but the fitted stddev carries
@@ -1114,9 +1140,9 @@ class ProperTransientFinder:
                 required = int(np.ceil(support))
                 raise ValueError(
                     f"Gaussian PSF too wide for radius {radius}; "
-                    f"increase --psf-radius to at least {required}"
+                    f"increase {radius_option} to at least {required}"
                 )
-        psf = normalize_psf(psf, self.options.psf_radius)
+        psf = normalize_psf(psf, radius)
         # The second moment is discretized on the pixel grid, so psf_fwhm reads
         # ~0.5% low for a 1.5 px stamp and a PSF meeting the nominal sampling
         # limit would be rejected by estimator bias alone. The 2% tolerance
@@ -1255,8 +1281,18 @@ class ProperTransientFinder:
     def perform_image_subtraction(self):
         reference, new = self._prepare()
         with self._stage("psf_estimation"):
-            self.ref_psf = self._estimate_psf(self.reference, self.options.ref_psf)
-            self.new_psf = self._estimate_psf(self.new, self.options.new_psf)
+            self.ref_psf = self._estimate_psf(
+                self.reference,
+                self.options.ref_psf,
+                self.options.reference_psf_radius,
+                "--psf-radius" if self.options.ref_psf_radius is None else "--ref-psf-radius",
+            )
+            self.new_psf = self._estimate_psf(
+                self.new,
+                self.options.new_psf,
+                self.options.science_psf_radius,
+                "--psf-radius" if self.options.new_psf_radius is None else "--new-psf-radius",
+            )
         ref_fwhm = psf_fwhm(self.ref_psf)
         new_fwhm = psf_fwhm(self.new_psf)
         self.metadata.update(
@@ -1694,7 +1730,11 @@ class ProperTransientFinder:
                 "minimum_psf_fwhm_pixels": PSF_MIN_FWHM_PIXELS,
                 "psf_fwhm_estimator_tolerance": PSF_FWHM_ESTIMATOR_TOLERANCE,
                 "maximum_psf_four_sigma_support_pixels": (
-                    self.options.psf_radius + PSF_SUPPORT_MARGIN_PIXELS
+                    max(
+                        self.options.reference_psf_radius,
+                        self.options.science_psf_radius,
+                    )
+                    + PSF_SUPPORT_MARGIN_PIXELS
                 ),
             },
             "rejection_reasons": counts,
@@ -2083,6 +2123,45 @@ def compare_cross_filter(
     return pipeline.run_full_pipeline(threshold_sigma)
 
 
+def _format_batch_totals(items) -> str:
+    """Summarize final survey batch outcomes on one line."""
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item.state] = counts.get(item.state, 0) + 1
+    parts = [
+        f"completed={counts.get('completed', 0)}",
+        f"failed={counts.get('failed', 0)}",
+        f"acquisition_only={counts.get('acquisition_only', 0)}",
+    ]
+    parts.extend(
+        f"{state}={counts[state]}" for state in ("skipped", "interrupted") if counts.get(state)
+    )
+    return "Batch totals: " + ", ".join(parts)
+
+
+def _format_acquisition_only_table(entries: list[dict]) -> str:
+    """Render cached-but-unusable fallback templates as one aligned row each."""
+    rows = [
+        (
+            str(entry.get("name", "unknown")),
+            str(entry.get("delivered_band") or "unknown"),
+            str(entry.get("reference_fits") or "-"),
+        )
+        for entry in entries
+    ]
+    name_width = max(len("NAME"), *(len(row[0]) for row in rows))
+    band_width = max(len("BAND"), *(len(row[1]) for row in rows))
+    lines = [
+        f"Acquisition-only templates ({len(rows)}); no photometric subtraction.",
+        f"{'NAME':<{name_width}}  {'BAND':<{band_width}}  CACHED FITS",
+        *(
+            f"{name:<{name_width}}  {band:<{band_width}}  {fits_path}"
+            for name, band, fits_path in rows
+        ),
+    ]
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Command-line interface shared by the standalone wrapper and module."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -2106,6 +2185,14 @@ def main(argv: list[str] | None = None) -> int:
         choices=("adu", "electron"),
         help=("Declare the count-unit label applied to cache copies; does not convert HiPS pixels"),
     )
+    parser.add_argument(
+        "--science-units",
+        choices=("adu", "electron"),
+        help=(
+            "Declare science count units when the FITS header omits BUNIT; "
+            "must agree with a declared BUNIT and never converts pixels"
+        ),
+    )
     parser.add_argument("--template-gain", type=float, help="Template electrons per HiPS count")
     parser.add_argument("--survey-timeout", type=float, default=30)
     parser.add_argument("--max-download-mb", type=float, default=512)
@@ -2126,6 +2213,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--method", choices=("kernel", "proper"), default="kernel")
     parser.add_argument("--inf-loss", type=float, default=0.15)
     parser.add_argument("--psf-radius", type=int, default=8)
+    parser.add_argument(
+        "--ref-psf-radius",
+        type=int,
+        help="Reference PSF stamp radius in pixels; defaults to --psf-radius",
+    )
+    parser.add_argument(
+        "--new-psf-radius",
+        type=int,
+        help="Science PSF stamp radius in pixels; defaults to --psf-radius",
+    )
     parser.add_argument("--gain", type=float, help="Electrons per input image count")
     parser.add_argument("--saturation", type=float, help="Saturation level in image counts")
     parser.add_argument("--flux-scale", type=float, help="Multiply reference counts by this factor")
@@ -2223,6 +2320,7 @@ def main(argv: list[str] | None = None) -> int:
         for name in (
             "template_filter",
             "science_filter",
+            "science_units",
             "template_units",
             "template_gain",
             "template_cache",
@@ -2249,6 +2347,7 @@ def main(argv: list[str] | None = None) -> int:
             survey_options[name] is not None
             for name in (
                 "template_filter",
+                "science_units",
                 "template_units",
                 "template_gain",
             )
@@ -2296,6 +2395,10 @@ def main(argv: list[str] | None = None) -> int:
                     print(json.dumps(report.to_dict(), indent=2, allow_nan=False))
                 else:
                     print(f"Survey batch {report.state}. Results: {report.output_dir}")
+                    status = report.survey_status or {}
+                    if status.get("acquisition_only"):
+                        print(_format_acquisition_only_table(status["acquisition_only"]))
+                    print(_format_batch_totals(report.items))
                 return 0 if report.successful else 1
             result = compare_survey_images(
                 new,

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from io import BytesIO
+from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import parse_qs, urlsplit
 
@@ -146,18 +147,22 @@ def test_hips_download_retries_all_service_hosts_before_giving_up(tmp_path, monk
     monkeypatch.setattr(survey, "sleep", delays.append)
     with pytest.raises(URLError, match="every service host"):
         survey.fetch_survey_template(request, tmp_path / "cache")
-    hosts = [urlsplit(url).hostname for url in calls]
+    hips_calls = [url for url in calls if "/hips-image-services/" in url]
+    hosts = [urlsplit(url).hostname for url in hips_calls]
     expected = [urlsplit(base).hostname for base in survey.HIPS_SERVICE_URLS]
     assert hosts == expected * survey.SERVICE_ATTEMPTS
-    assert delays == [survey.HIPS_RETRY_DELAY_SECONDS] * (survey.SERVICE_ATTEMPTS - 1)
+    assert delays == [survey.HIPS_RETRY_DELAY_SECONDS] * (2 * survey.SERVICE_ATTEMPTS - 2)
 
 
 def test_survey_options_deliver_a_grid_aligned_template_without_reprojection():
     options = survey._survey_options(config={"plots": False})
     assert options.reproject is False
     assert options.reproject_units == "flux-per-pixel"
+    aligned = survey._survey_options(config={"align": True})
+    assert aligned.align is True
+    assert aligned.reproject is False
     with pytest.raises(ValueError, match="kernel"):
-        survey._survey_options(config={"align": True})
+        survey._survey_options(config={"method": "proper"})
 
 
 @pytest.mark.parametrize(
@@ -355,6 +360,211 @@ def test_survey_results_directory_is_replaced_only_with_overwrite(tmp_path, monk
     report = json.loads(stale.read_text(encoding="utf-8"))
     assert report["state"] == "failed"
     assert report["warnings"]
+
+
+def skyview_payload(
+    *,
+    shape: tuple[int, int] = (64, 64),
+    crval: tuple[float, float] = (180.0, 20.0),
+    pixel_scale_arcsec: float = 1.0,
+):
+    """Build a SkyView-like cutout on its own tangent grid."""
+    wcs = WCS(naxis=2)
+    wcs.wcs.crpix = [(shape[1] + 1) / 2, (shape[0] + 1) / 2]
+    wcs.wcs.crval = list(crval)
+    wcs.wcs.cdelt = [-pixel_scale_arcsec / 3600, pixel_scale_arcsec / 3600]
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    return payload(np.ones(shape), wcs.to_header())
+
+
+def test_skyview_fallback_reprojects_after_every_hips2fits_host_fails(tmp_path, monkeypatch):
+    science, _ = science_image(tmp_path)
+    request = survey.prepare_template_request(science, "r")
+    calls = []
+
+    def download(url, timeout, limit):
+        calls.append(url)
+        if "/hips-image-services/" in url:
+            raise URLError("CDS hips2fits unavailable")
+        return skyview_payload()
+
+    monkeypatch.setattr(survey, "_download_url", download)
+    monkeypatch.setattr(survey, "sleep", lambda *_: None)
+    template = survey.fetch_survey_template(request, tmp_path / "cache")
+
+    hips_hosts = [urlsplit(base).hostname for base in survey.HIPS_SERVICE_URLS]
+    attempts = len(hips_hosts) * survey.SERVICE_ATTEMPTS
+    attempted_hosts = [urlsplit(url).hostname for url in calls[:attempts]]
+    assert attempted_hosts == hips_hosts * survey.SERVICE_ATTEMPTS
+    assert len(calls) == attempts + 1
+    query = parse_qs(urlsplit(calls[-1]).query)
+    assert urlsplit(calls[-1]).hostname == "skyview.gsfc.nasa.gov"
+    assert query["Survey"] == ["dss2r"]
+    assert query["Return"] == ["FITS"]
+    assert template.metadata["service"] == "NASA SkyView"
+    assert template.metadata["fallback"]["survey"] == "dss2r"
+    assert template.metadata["delivered_band"] == "dss2r"
+    assert template.metadata["asinh_linearized"] is False
+    assert template.metadata["acquisition_only"] is True
+    assert template.metadata["photometric_subtraction_allowed"] is False
+    warnings = " ".join(template.metadata["warnings"])
+    assert "different survey and bandpass" in warnings
+    assert "acquisition-only" in warnings
+    with fits.open(template.fits_path) as hdus:
+        assert hdus[0].data.shape == (64, 64)
+        assert hdus[0].header["FILTER"] == "dss2r"
+        np.testing.assert_allclose(hdus[0].data, 1.0)
+
+
+def test_skyview_fallback_masks_pixels_outside_the_cutout(tmp_path, monkeypatch):
+    science, _ = science_image(tmp_path)
+    request = survey.prepare_template_request(science, "r")
+
+    def download(url, timeout, limit):
+        if "/hips-image-services/" in url:
+            raise URLError("CDS hips2fits unavailable")
+        return skyview_payload(shape=(32, 32), crval=(181.0, 20.0))
+
+    monkeypatch.setattr(survey, "_download_url", download)
+    monkeypatch.setattr(survey, "sleep", lambda *_: None)
+    template = survey.fetch_survey_template(request, tmp_path / "cache")
+    with fits.open(template.fits_path) as hdus:
+        assert np.isnan(hdus[0].data).all()
+        assert hdus["MASK"].data.all()
+
+
+def test_skyview_fallback_is_acquisition_only_and_cannot_be_subtracted(tmp_path, monkeypatch):
+    science, _ = science_image(tmp_path)
+    results = tmp_path / "results"
+
+    def download(url, timeout, limit):
+        if "/hips-image-services/" in url:
+            raise URLError("CDS hips2fits unavailable")
+        return skyview_payload()
+
+    monkeypatch.setattr(survey, "_download_url", download)
+    monkeypatch.setattr(survey, "sleep", lambda *_: None)
+    with pytest.raises(survey.FallbackAcquisitionOnlyError, match="acquisition-only"):
+        survey.compare_survey_images(
+            science,
+            results,
+            template_filter="r",
+            survey="panstarrs",
+            cache_dir=tmp_path / "cache",
+            config={"plots": False},
+        )
+    report = json.loads((results / "survey_reference.json").read_text(encoding="utf-8"))
+    assert report["state"] == "acquisition_only"
+    assert report["template"]["acquisition_only"] is True
+    assert report["template"]["photometric_subtraction_allowed"] is False
+    assert Path(report["reference_fits"]).is_file()
+    assert not (results / "analysis").exists()
+
+
+def test_cached_skyview_fallback_without_new_flags_stays_acquisition_only(tmp_path, monkeypatch):
+    science, _ = science_image(tmp_path)
+    request = survey.prepare_template_request(science, "r")
+    cache = tmp_path / "cache"
+
+    def download(url, timeout, limit):
+        if "/hips-image-services/" in url:
+            raise URLError("CDS hips2fits unavailable")
+        return skyview_payload()
+
+    monkeypatch.setattr(survey, "_download_url", download)
+    monkeypatch.setattr(survey, "sleep", lambda *_: None)
+    survey.fetch_survey_template(request, cache)
+    manifest = next(cache.glob("*.hips.json"))
+    metadata = json.loads(manifest.read_text(encoding="utf-8"))
+    metadata.pop("acquisition_only")
+    metadata.pop("photometric_subtraction_allowed")
+    manifest.write_text(json.dumps(metadata), encoding="utf-8")
+    cached = survey.fetch_survey_template(request, cache)
+    assert cached.metadata["acquisition_only"] is True
+    assert cached.metadata["photometric_subtraction_allowed"] is False
+
+
+def test_survey_batch_summary_lists_acquisition_only_templates(tmp_path, monkeypatch):
+    first, _ = science_image(tmp_path, name="science_1.fits")
+    second, _ = science_image(tmp_path, name="science_2.fits")
+    results = tmp_path / "results"
+
+    def download(url, timeout, limit):
+        if "/hips-image-services/" in url:
+            raise URLError("CDS hips2fits unavailable")
+        return skyview_payload()
+
+    monkeypatch.setattr(survey, "_download_url", download)
+    monkeypatch.setattr(survey, "sleep", lambda *_: None)
+    report = survey.compare_survey_batch(
+        [first, second],
+        results,
+        template_filter="r",
+        survey="panstarrs",
+        cache_dir=tmp_path / "cache",
+        config={"plots": False},
+    )
+    assert report.state == "completed_with_errors"
+    assert [item.state for item in report.items] == ["acquisition_only", "acquisition_only"]
+    status = report.survey_status
+    assert status["acquisition_only_count"] == 2
+    assert {entry["name"] for entry in status["acquisition_only"]} == {
+        "science-0001",
+        "science-0002",
+    }
+    summary = json.loads((results / "batch_summary.json").read_text(encoding="utf-8"))
+    assert summary["survey_status"]["acquisition_only_count"] == 2
+    assert summary["counts"]["acquisition_only"] == 2
+    assert all(Path(entry["reference_fits"]).is_file() for entry in status["acquisition_only"])
+    assert not any((item.output_dir / "analysis").exists() for item in report.items)
+
+
+def test_skyview_fallback_is_not_used_for_explicit_identifiers(tmp_path, monkeypatch):
+    science, _ = science_image(tmp_path)
+    request = survey.prepare_template_request(science, "W1", survey="CDS/P/NEOWISER/W1")
+    calls = []
+
+    def download(url, timeout, limit):
+        calls.append(url)
+        raise URLError("service unavailable")
+
+    monkeypatch.setattr(survey, "_download_url", download)
+    monkeypatch.setattr(survey, "sleep", lambda *_: None)
+    with pytest.raises(URLError, match="every service host"):
+        survey.fetch_survey_template(request, tmp_path / "cache")
+    assert all("skyview" not in url for url in calls)
+
+
+@pytest.mark.parametrize(
+    ("band", "survey_name"),
+    [("g", "dss2b"), ("r", "dss2r"), ("i", "dss2ir")],
+)
+def test_skyview_fallback_maps_optical_bands(tmp_path, band, survey_name):
+    science, _ = science_image(tmp_path)
+    request = survey.prepare_template_request(science, band)
+    assert survey._skyview_survey(request) == survey_name
+
+
+def test_science_units_declaration_fills_a_missing_bunit():
+    header = fits.Header({"FILTER": "r"})
+    assert survey._science_unit(header, "adu") == "adu"
+    assert survey._science_unit(header, "electron") == "electron"
+
+
+def test_science_units_declaration_must_agree_with_bunit():
+    with pytest.raises(ValueError, match="disagree"):
+        survey._science_unit(fits.Header({"BUNIT": "electron"}), "adu")
+    assert survey._science_unit(fits.Header({"BUNIT": "ADU"}), "adu") == "adu"
+
+
+def test_missing_science_units_requires_a_declaration():
+    with pytest.raises(ValueError, match="--science-units"):
+        survey._science_unit(fits.Header({"FILTER": "r"}), None)
+
+
+def test_skyview_fallback_is_unavailable_for_unmapped_bands(tmp_path):
+    science, _ = science_image(tmp_path)
+    assert survey._skyview_survey(survey.prepare_template_request(science, "z")) is None
 
 
 def test_stc_polygon_keeps_longitudes_continuous_across_ra_zero(tmp_path):

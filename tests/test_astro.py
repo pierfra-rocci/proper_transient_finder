@@ -270,6 +270,41 @@ def test_survey_uses_sci_header_when_variance_is_first(tmp_path):
         assert "FILTER" not in hdus["VAR"].header
 
 
+def test_survey_batch_totals_line_counts_outcomes() -> None:
+    from types import SimpleNamespace
+
+    items = [
+        SimpleNamespace(state="completed"),
+        SimpleNamespace(state="completed"),
+        SimpleNamespace(state="acquisition_only"),
+        SimpleNamespace(state="failed"),
+        SimpleNamespace(state="skipped"),
+    ]
+    line = astro._format_batch_totals(items)
+    assert line == ("Batch totals: completed=2, failed=1, acquisition_only=1, skipped=1")
+
+
+def test_acquisition_only_cli_table_is_one_line_per_template() -> None:
+    table = astro._format_acquisition_only_table(
+        [
+            {
+                "name": "science-0001",
+                "delivered_band": "dss2r",
+                "reference_fits": "cache/a.hips.fits",
+            },
+            {"name": "science-0002", "delivered_band": None, "reference_fits": None},
+        ]
+    )
+    lines = table.splitlines()
+    assert lines[0] == "Acquisition-only templates (2); no photometric subtraction."
+    assert lines[1].split() == ["NAME", "BAND", "CACHED", "FITS"]
+    assert len(lines) == 4
+    assert lines[2].startswith("science-0001  dss2r")
+    assert lines[2].endswith("cache/a.hips.fits")
+    assert "unknown" in lines[3]
+    assert lines[3].endswith("  -")
+
+
 @pytest.mark.parametrize(
     "options",
     [
@@ -279,7 +314,7 @@ def test_survey_uses_sci_header_when_variance_is_first(tmp_path):
         {"template_gain": -1},
         {"template_units": "mag"},
         {"check_moc_coverage": None},
-        {"config": {"align": True}},
+        {"config": {"method": "proper"}},
     ],
 )
 def test_survey_batch_rejects_invalid_shared_options_before_writes(tmp_path, options):
@@ -1369,8 +1404,12 @@ def test_real_properimage_psfs_and_photometric_scaling(tmp_path) -> None:
     assert mask.dtype == bool
 
 
-def gaussian_seeing_pair(directory, sigma, *, seed=11):
-    """Render one star field seen through an exact Gaussian PSF of ``sigma`` pixels."""
+def gaussian_seeing_pair(directory, sigma, *, seed=11, new_sigma=None):
+    """Render one star field seen through exact Gaussian PSFs.
+
+    ``new_sigma`` optionally gives the science frame different seeing, which is
+    how a cross-resolution template reaches the per-frame PSF radii.
+    """
     from proper_transient_finder.astro import convolve_image
 
     rng = np.random.default_rng(seed)
@@ -1380,17 +1419,48 @@ def gaussian_seeing_pair(directory, sigma, *, seed=11):
         for column in (40, 75, 110, 145, 180, 215):
             star_row, star_column = row + rng.integers(-5, 6), column + rng.integers(-5, 6)
             stars[star_row, star_column] = rng.uniform(10000, 20000)
-    image = convolve_image(stars, Gaussian2DKernel(sigma).array)
     header = fits.Header({"GAIN": 2.0, "SATURATE": 50000})
     paths = []
     for name in ("reference", "new"):
-        frame = image + 100 + rng.normal(0, 2, shape)
+        width = sigma if new_sigma is None or name == "reference" else new_sigma
+        frame = convolve_image(stars, Gaussian2DKernel(width).array)
+        frame = frame + 100 + rng.normal(0, 2, shape)
         if name == "new":
             frame[128, 128] += 6000
         path = directory / f"{name}.fits"
         fits.writeto(path, frame, header)
         paths.append(path)
     return paths
+
+
+def test_per_frame_psf_radii_allow_cross_resolution_pair(tmp_path) -> None:
+    """A broad template and a sharp science frame need different stamp radii."""
+    paths = gaussian_seeing_pair(tmp_path, 2.7, new_sigma=1.4)
+    pipeline = ProperTransientFinder(
+        *paths,
+        tmp_path / "out",
+        {"cosmic_rays": False, "ref_psf_radius": 12, "new_psf_radius": 6},
+    )
+    assert pipeline.options.reference_psf_radius == 12
+    assert pipeline.options.science_psf_radius == 6
+    pipeline.perform_image_subtraction()
+    assert pipeline.ref_psf.shape == (25, 25)
+    assert pipeline.new_psf.shape == (13, 13)
+    assert pipeline.metadata["ref_fwhm_pixels"] == pytest.approx(
+        astro.FWHM_PER_SIGMA * 2.7, rel=0.08
+    )
+    assert pipeline.metadata["new_fwhm_pixels"] == pytest.approx(
+        astro.FWHM_PER_SIGMA * 1.4, rel=0.08
+    )
+
+
+def test_per_frame_psf_radii_default_to_shared_radius(tmp_path) -> None:
+    paths = gaussian_seeing_pair(tmp_path, 2.1)
+    pipeline = ProperTransientFinder(
+        *paths, tmp_path / "out", {"cosmic_rays": False, "psf_radius": 10}
+    )
+    assert pipeline.options.reference_psf_radius == 10
+    assert pipeline.options.science_psf_radius == 10
 
 
 def test_psf_guard_accepts_four_sigma_support_up_to_one_pixel_beyond_stamp(tmp_path) -> None:
@@ -1603,6 +1673,9 @@ def test_batch_cli_applies_shared_science_filter_override(tmp_path, capsys):
         {"inf_loss": 1},
         {"alignment_tolerance": float("nan")},
         {"psf_radius": 1},
+        {"ref_psf_radius": 1},
+        {"new_psf_radius": 2},
+        {"method": "proper", "ref_psf_radius": 10},
         {"ref_psf": "only-one.fits"},
         {"cross_filter": True, "method": "proper"},
         {"cross_filter": True, "max_scale_scatter": float("nan")},
