@@ -30,7 +30,7 @@ jobs:
         run: |
           VERSION="$(python -c "import runpy; print(runpy.run_path('src/proper_transient_finder/_version.py')['__version__'])")"
           # Accept both release tag styles used by this repository: v<version>
-          # and the historical v_<version> (tags v_0.1.0 through v_0.3.1).
+          # and the historical v_<version> (tags v_0.1.0 through v_0.3.2).
           NORMALIZED="${TAG#v}"
           NORMALIZED="${NORMALIZED#_}"
           if [ "$NORMALIZED" != "$VERSION" ]; then

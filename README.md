@@ -6,7 +6,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/pierfra-rocci/proper_transient_finder)](https://github.com/pierfra-rocci/proper_transient_finder/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/pierfra-rocci/proper_transient_finder)](https://github.com/pierfra-rocci/proper_transient_finder/forks)
 [![GitHub issues](https://img.shields.io/github/issues/pierfra-rocci/proper_transient_finder)](https://github.com/pierfra-rocci/proper_transient_finder/issues)
-[![Version](https://img.shields.io/badge/version-0.3.1-blue)](https://github.com/pierfra-rocci/proper_transient_finder/releases)
+[![Version](https://img.shields.io/badge/version-0.3.2-blue)](https://github.com/pierfra-rocci/proper_transient_finder/releases)
 [![Documentation build](https://github.com/pierfra-rocci/proper_transient_finder/actions/workflows/docs.yml/badge.svg)](https://github.com/pierfra-rocci/proper_transient_finder/actions/workflows/docs.yml)
 
 
@@ -18,7 +18,7 @@ transient-candidate analysis. Python 3.11 or newer is required.
 The distribution is named `proper-transient-finder`; import it as
 `proper_transient_finder`.
 
-Current release: `0.3.1`.
+Current release: `0.3.2`.
 
 Inputs can use `.fits`, `.fit`, `.fts`, gzip compression (`.fits.gz`, `.fit.gz`,
 `.fts.gz`) or FITS tiled compression (`.fits.fz`, `.fit.fz`, `.fts.fz`). No manual
@@ -29,7 +29,7 @@ decompression is required; files must retain their original binary contents.
 Install a built wheel into your chosen Python environment:
 
 ```powershell
-python -m pip install ./dist/proper_transient_finder-0.3.1-py3-none-any.whl
+python -m pip install ./dist/proper_transient_finder-0.3.2-py3-none-any.whl
 python -m pip check
 ```
 
@@ -422,13 +422,13 @@ runs of the same version green, but bump `_version.py` to dry-run changed code.
 2. Commit the change, then tag and push it:
 
 ```bash
-git tag v0.3.1
-git push origin v0.3.1
+git tag v0.3.2
+git push origin v0.3.2
 ```
 
 The build job fails before building if the pushed tag is not `v<version>` taken
 from `_version.py`, so a mistagged release never reaches an index. The
-historical `v_<version>` form (tags `v_0.1.0` through `v_0.3.1`) is accepted
+historical `v_<version>` form (tags `v_0.1.0` through `v_0.3.2`) is accepted
 too. After that check the test suite runs against the tagged commit, and the
 wheel and source archive are built only when it passes. The `Publish to PyPI`
 job then uploads to
