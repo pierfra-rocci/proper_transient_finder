@@ -4,7 +4,7 @@
 
 Developed with assistance from ChatGPT, Claude, and Mistral.
 
-Version: `0.3.3`.
+Version: `0.3.4`.
 
 This standalone manual covers the astronomical subtraction pipeline, its
 launcher, its regression tests, and the commands used to run and validate it.
@@ -155,7 +155,7 @@ bash scripts/tasks.sh lint
 bash scripts/tasks.sh test -q -k preflight
 bash scripts/tasks.sh docs --check --build
 bash scripts/tasks.sh build --no-isolation
-bash scripts/tasks.sh verify-install --distribution dist/proper_transient_finder-0.3.3-py3-none-any.whl
+bash scripts/tasks.sh verify-install --distribution dist/proper_transient_finder-0.3.4-py3-none-any.whl
 ```
 
 Its options mirror the PowerShell parameters: `--output-directory` for
@@ -250,7 +250,7 @@ To prepare all runtime and test dependencies for offline installation:
 & (Join-Path $PipelineRoot "scripts\build.ps1") -PythonPath $Python -NoIsolation -IncludeDependencies
 $Dist = Join-Path $PipelineRoot "dist"
 $Wheelhouse = Join-Path $Dist "wheelhouse"
-$Wheel = Join-Path $Dist "proper_transient_finder-0.3.3-py3-none-any.whl"
+$Wheel = Join-Path $Dist "proper_transient_finder-0.3.4-py3-none-any.whl"
 & $Python -m pip install --no-index --find-links $Wheelhouse $Wheel
 ```
 
@@ -265,7 +265,7 @@ Verify a genuine fresh installation, not an editable checkout:
 
 ```powershell
 & (Join-Path $PipelineRoot "scripts\verify_install.ps1") -PythonPath $Python -DistributionPath $Wheel -Wheelhouse $Wheelhouse
-$SourceArchive = Join-Path $Dist "proper_transient_finder-0.3.3.tar.gz"
+$SourceArchive = Join-Path $Dist "proper_transient_finder-0.3.4.tar.gz"
 & (Join-Path $PipelineRoot "scripts\verify_install.ps1") -PythonPath $Python -DistributionPath $SourceArchive -Wheelhouse $Wheelhouse
 ```
 
