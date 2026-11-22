@@ -1474,6 +1474,10 @@ def test_psf_guard_accepts_four_sigma_support_up_to_one_pixel_beyond_stamp(tmp_p
     # This is exactly the band the bare 4-sigma rule rejected outright.
     assert radius < 4 * sigma <= radius + 1
     assert psf.sum() == pytest.approx(1.0)
+    assert pipeline.metadata["reference_psf_radius_used"] == radius
+    assert pipeline.metadata["science_psf_radius_used"] == radius
+    summary = pipeline.quality_summary()
+    assert summary["metrics"]["science_psf_radius_used"] == radius
 
 
 def test_psf_guard_rejects_gaussian_wider_than_stamp_tolerance(tmp_path) -> None:
@@ -1482,6 +1486,53 @@ def test_psf_guard_rejects_gaussian_wider_than_stamp_tolerance(tmp_path) -> None
     with pytest.raises(ValueError, match="Gaussian PSF too wide for radius 8") as error:
         pipeline.perform_image_subtraction()
     assert "increase --psf-radius to at least" in str(error.value)
+
+
+def test_psf_estimation_uses_finite_mask_valid_stamps(tmp_path) -> None:
+    paths = gaussian_seeing_pair(tmp_path, 1.5)
+    pipeline = ProperTransientFinder(*paths, tmp_path / "out", {"cosmic_rays": False})
+    frame = load_frame(paths[0], cosmic_rays=False)
+    frame.mask[:, :90] = True
+    frame.data[:, :90] = np.nan
+
+    psf, radius = pipeline._estimate_psf(frame, None, 20, "--psf-radius")
+
+    assert radius == 20
+    assert psf.shape == (41, 41)
+    assert psf.sum() == pytest.approx(1.0)
+    assert astro.psf_fwhm(psf) == pytest.approx(astro.FWHM_PER_SIGMA * 1.5, rel=0.1)
+
+
+def _mask_to_star_cores(frame) -> None:
+    catalog = astro.star_catalog(frame)
+    frame.mask[:] = True
+    for source in catalog:
+        x, y = int(round(source["x"])), int(round(source["y"]))
+        frame.mask[y - 5 : y + 6, x - 5 : x + 6] = False
+    frame.data[frame.mask] = np.nan
+
+
+def test_psf_estimation_reduces_radius_only_for_insufficient_valid_stamps(tmp_path) -> None:
+    paths = gaussian_seeing_pair(tmp_path, 1.0)
+    pipeline = ProperTransientFinder(*paths, tmp_path / "out", {"cosmic_rays": False})
+    frame = load_frame(paths[0], cosmic_rays=False)
+    _mask_to_star_cores(frame)
+
+    psf, radius = pipeline._estimate_psf(frame, None, 12, "--psf-radius")
+
+    assert 3 <= radius < 12
+    assert psf.shape == (2 * radius + 1, 2 * radius + 1)
+    assert psf.sum() == pytest.approx(1.0)
+
+
+def test_psf_estimation_does_not_reduce_radius_below_psf_support(tmp_path) -> None:
+    paths = gaussian_seeing_pair(tmp_path, 2.1)
+    pipeline = ProperTransientFinder(*paths, tmp_path / "out", {"cosmic_rays": False})
+    frame = load_frame(paths[0], cosmic_rays=False)
+    _mask_to_star_cores(frame)
+
+    with pytest.raises(ValueError, match="Automatic PSF radius was reduced"):
+        pipeline._estimate_psf(frame, None, 12, "--psf-radius")
 
 
 def test_psf_guard_accepts_psf_at_minimum_sampling_limit(tmp_path) -> None:
@@ -2125,6 +2176,19 @@ def test_registration_rejects_shifted_images_and_align_repairs_them(tmp_path) ->
     np.testing.assert_allclose(transform[:2, :2], np.eye(2), atol=0.005)
     np.testing.assert_allclose(transform[:2, 2], [0.8, -1.3], atol=0.05)
     assert pipeline.scorr_image[128, 128] > 10
+
+
+def test_registration_error_does_not_repeat_align_advice_after_align(tmp_path, monkeypatch) -> None:
+    paths = synthetic_pair(tmp_path, displaced=True)
+    pipeline = ProperTransientFinder(
+        *paths, tmp_path / "out", {"cosmic_rays": False, "align": True}
+    )
+    monkeypatch.setattr(pipeline, "_register", lambda reference, new: None)
+
+    with pytest.raises(ValueError, match="inspect matched stars and field overlap") as error:
+        pipeline._prepare()
+
+    assert "use --align" not in str(error.value)
 
 
 def test_cosmic_saturation_and_nan_do_not_become_candidates(tmp_path) -> None:

@@ -713,12 +713,15 @@ class PipelineConfig:
 
 def star_catalog(frame: ImageFrame) -> np.ndarray:
     """Select isolated, unmasked SEP detections for PSF and registration checks."""
-    errors = np.sqrt(np.maximum(frame.variance, np.finfo(float).tiny))
+    valid = ~frame.mask & np.isfinite(frame.data) & np.isfinite(frame.variance)
+    data = np.ascontiguousarray(np.where(valid, frame.data, 0.0))
+    variance = np.where(valid, frame.variance, 1.0)
+    errors = np.sqrt(np.maximum(variance, np.finfo(float).tiny))
     objects = sep.extract(
-        frame.data,
+        data,
         5.0,
         err=errors,
-        mask=frame.mask,
+        mask=~valid,
         minarea=5,
         deblend_cont=0.005,
     )
@@ -1036,7 +1039,15 @@ class ProperTransientFinder:
         offsets = np.hypot(reference["x"] - new["x"], reference["y"] - new["y"])
         rms = float(np.sqrt(np.mean(offsets**2)))
         if rms > options.alignment_tolerance:
-            advice = "check input astrometric WCS" if options.reproject else "use --align"
+            if options.reproject:
+                advice = "check input astrometric WCS"
+            elif options.align or options.shift:
+                advice = (
+                    "inspect matched stars and field overlap; increase "
+                    "--alignment-tolerance only if justified"
+                )
+            else:
+                advice = "use --align or check field overlap"
             raise ValueError(
                 f"Registration RMS {rms:.3f} pixels exceeds tolerance "
                 f"{options.alignment_tolerance:.3f}; {advice}"
@@ -1094,10 +1105,12 @@ class ProperTransientFinder:
 
     def _estimate_psf(
         self, frame: ImageFrame, supplied: str | None, radius: int, radius_option: str
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, int]:
         if supplied:
-            return normalize_psf(fits.getdata(supplied, memmap=False), radius)
-        from properimage.single_image import SingleImageGaussPSF
+            return normalize_psf(fits.getdata(supplied, memmap=False), radius), radius
+
+        from astropy.modeling import fitting, models
+        from astropy.modeling.fitting import NonFiniteValueError
 
         catalog = star_catalog(frame)
         if len(catalog) < self.options.min_stars:
@@ -1105,44 +1118,147 @@ class ProperTransientFinder:
                 f"Too few isolated stars for PSF estimation: {len(catalog)}; "
                 f"require >= {self.options.min_stars}. Check masks, saturation, and seeing."
             )
-        with SingleImageGaussPSF(
-            frame.data,
-            mask=frame.mask,
-            guessmask=False,
-            gain=frame.gain,
-            min_sources=self.options.min_stars,
-            strict_star_pick=False,
-            stamp_shape=(2 * radius + 1,) * 2,
-            smooth_psf=self.options.smooth_psf,
-        ) as image:
-            # ProperImage's own strict selection silently keeps every detected
-            # source when fewer than 15 pass its cuts, so galaxy light, blends
-            # and noise widen the Gaussian fit. Seed its source cache with our
-            # isolated SEP stars instead, which are already round, unmasked and
-            # isolated; this keeps ProperImage's stamping and fitting machinery.
-            image._best_sources = catalog[:50]
-            _, basis = image.get_variable_psf(inf_loss=self.options.inf_loss)
-            if image.n_sources < self.options.min_stars:
-                raise ValueError(
-                    f"Too few PSF stars selected by ProperImage: {image.n_sources}; "
-                    f"require >= {self.options.min_stars}"
+        requested_radius = radius
+        fitted = []
+        used_radius = radius
+        while used_radius >= 3:
+            row, column = np.indices((2 * used_radius + 1,) * 2, dtype=float)
+            minimum_valid = max(20, int(np.ceil(row.size * 0.5)))
+            for source in catalog:
+                if len(fitted) >= 50:
+                    break
+                source_parameters = np.asarray(
+                    [source["x"], source["y"], source["a"], source["b"], source["theta"]],
+                    dtype=float,
                 )
-            model = basis[1]
-            row, column = np.mgrid[-radius : radius + 1, -radius : radius + 1]
-            psf = model(column, row)
-            # Four sigma is the support target, but the fitted stddev carries
-            # sub-pixel scatter between platforms and library versions, and a
-            # Gaussian truncated at exactly 4 sigma loses <0.2% of its flux,
-            # under the 0.5% tolerance enforced by normalize_psf. Allow that one
-            # pixel of stamp margin so seeing near radius / 4 is not a knife-edge.
-            support = PSF_SUPPORT_SIGMA * max(model.x_stddev.value, model.y_stddev.value)
-            if support > radius + PSF_SUPPORT_MARGIN_PIXELS:
-                required = int(np.ceil(support))
-                raise ValueError(
-                    f"Gaussian PSF too wide for radius {radius}; "
-                    f"increase {radius_option} to at least {required}"
+                if not np.isfinite(source_parameters).all() or source["a"] <= 0 or source["b"] <= 0:
+                    continue
+                x_start = int(np.rint(source["x"])) - used_radius
+                y_start = int(np.rint(source["y"])) - used_radius
+                x_stop, y_stop = x_start + 2 * used_radius + 1, y_start + 2 * used_radius + 1
+                outside_frame = (
+                    x_start < 0
+                    or y_start < 0
+                    or x_stop > frame.data.shape[1]
+                    or y_stop > frame.data.shape[0]
                 )
-        psf = normalize_psf(psf, radius)
+                if outside_frame:
+                    continue
+                stamp = frame.data[y_start:y_stop, x_start:x_stop]
+                valid = ~frame.mask[y_start:y_stop, x_start:x_stop] & np.isfinite(stamp)
+                if np.count_nonzero(valid) < minimum_valid:
+                    continue
+                edge = np.hypot(row - used_radius, column - used_radius) >= used_radius * 0.7
+                baseline_pixels = stamp[valid & edge]
+                if not baseline_pixels.size:
+                    baseline_pixels = stamp[valid]
+                baseline = float(np.median(baseline_pixels))
+                amplitude = float(np.max(stamp[valid]) - baseline)
+                if not np.isfinite(amplitude) or amplitude <= 0:
+                    continue
+                normalized = (stamp - baseline) / amplitude
+                x_mean = float(source["x"] - x_start)
+                y_mean = float(source["y"] - y_start)
+                gaussian = models.Gaussian2D(
+                    amplitude=1.0,
+                    x_mean=x_mean,
+                    y_mean=y_mean,
+                    x_stddev=min(max(float(source["a"]), 0.5), used_radius),
+                    y_stddev=min(max(float(source["b"]), 0.5), used_radius),
+                    theta=float(source["theta"]),
+                )
+                gaussian.amplitude.bounds = (0.0, 5.0)
+                gaussian.x_mean.bounds = (
+                    max(0.0, x_mean - 1.5),
+                    min(2 * used_radius, x_mean + 1.5),
+                )
+                gaussian.y_mean.bounds = (
+                    max(0.0, y_mean - 1.5),
+                    min(2 * used_radius, y_mean + 1.5),
+                )
+                gaussian.x_stddev.bounds = (0.2, 2 * used_radius)
+                gaussian.y_stddev.bounds = (0.2, 2 * used_radius)
+                gaussian.theta.bounds = (-np.pi / 2, np.pi / 2)
+                model = gaussian + models.Const2D(amplitude=0.0)
+                try:
+                    result = fitting.LevMarLSQFitter()(
+                        model,
+                        column[valid],
+                        row[valid],
+                        normalized[valid],
+                    )
+                except NonFiniteValueError:
+                    continue
+                star_model = result[0]
+                parameters = np.asarray(
+                    [
+                        star_model.amplitude.value,
+                        star_model.x_mean.value,
+                        star_model.y_mean.value,
+                        star_model.x_stddev.value,
+                        star_model.y_stddev.value,
+                        star_model.theta.value,
+                    ],
+                    dtype=float,
+                )
+                if (
+                    not np.isfinite(parameters).all()
+                    or star_model.amplitude.value <= 0
+                    or star_model.x_stddev.value <= 0
+                    or star_model.y_stddev.value <= 0
+                ):
+                    continue
+                fitted.append(parameters)
+            if len(fitted) >= self.options.min_stars:
+                break
+            fitted.clear()
+            used_radius -= 1
+        if len(fitted) < self.options.min_stars:
+            raise ValueError(
+                f"Too few finite, mask-valid PSF star stamps at radii "
+                f"{requested_radius} through 3: {len(fitted)} fit; require "
+                f">= {self.options.min_stars}. Check masks, saturation, and seeing."
+            )
+        if used_radius < requested_radius:
+            LOGGER.warning(
+                "Reduced automatic PSF radius from %d to %d pixels after mask-aware "
+                "fitting found too few usable stamps",
+                requested_radius,
+                used_radius,
+            )
+        parameters = np.asarray(fitted)
+        x_stddev, y_stddev = np.median(parameters[:, 3:5], axis=0)
+        theta = 0.5 * np.arctan2(
+            np.median(np.sin(2 * parameters[:, 5])),
+            np.median(np.cos(2 * parameters[:, 5])),
+        )
+        model = models.Gaussian2D(
+            amplitude=1.0,
+            x_mean=0.0,
+            y_mean=0.0,
+            x_stddev=float(x_stddev),
+            y_stddev=float(y_stddev),
+            theta=float(theta),
+        )
+        row, column = np.mgrid[-used_radius : used_radius + 1, -used_radius : used_radius + 1]
+        psf = model(column, row)
+        # Four sigma is the support target, and normalize_psf independently
+        # rejects stamps that lose more than 0.5% of the fitted flux.
+        support = PSF_SUPPORT_SIGMA * max(model.x_stddev.value, model.y_stddev.value)
+        if support > used_radius + PSF_SUPPORT_MARGIN_PIXELS:
+            required = int(np.ceil(support))
+            if used_radius < requested_radius:
+                raise ValueError(
+                    f"Automatic PSF radius was reduced to {used_radius} from "
+                    f"{requested_radius}, but the fitted PSF needs radius {required}; "
+                    f"correct the masks or provide measured PSFs instead of reducing "
+                    f"{radius_option}."
+                )
+            raise ValueError(
+                f"Gaussian PSF too wide for radius {used_radius}; "
+                f"increase {radius_option} to at least {required}"
+            )
+        psf = normalize_psf(psf, used_radius)
         # The second moment is discretized on the pixel grid, so psf_fwhm reads
         # ~0.5% low for a 1.5 px stamp and a PSF meeting the nominal sampling
         # limit would be rejected by estimator bias alone. The 2% tolerance
@@ -1152,7 +1268,7 @@ class ProperTransientFinder:
             raise ValueError(
                 f"PSF is undersampled ({fwhm:.2f} pixels FWHM; minimum 1.5); inspect the PSF stars"
             )
-        return psf
+        return psf, used_radius
 
     def _flux_scale(self, reference: np.ndarray, new: np.ndarray) -> float:
         if self.options.flux_scale is not None:
@@ -1281,18 +1397,20 @@ class ProperTransientFinder:
     def perform_image_subtraction(self):
         reference, new = self._prepare()
         with self._stage("psf_estimation"):
-            self.ref_psf = self._estimate_psf(
+            self.ref_psf, self.ref_psf_radius_used = self._estimate_psf(
                 self.reference,
                 self.options.ref_psf,
                 self.options.reference_psf_radius,
                 "--psf-radius" if self.options.ref_psf_radius is None else "--ref-psf-radius",
             )
-            self.new_psf = self._estimate_psf(
+            self.metadata["reference_psf_radius_used"] = self.ref_psf_radius_used
+            self.new_psf, self.new_psf_radius_used = self._estimate_psf(
                 self.new,
                 self.options.new_psf,
                 self.options.science_psf_radius,
                 "--psf-radius" if self.options.new_psf_radius is None else "--new-psf-radius",
             )
+            self.metadata["science_psf_radius_used"] = self.new_psf_radius_used
         ref_fwhm = psf_fwhm(self.ref_psf)
         new_fwhm = psf_fwhm(self.new_psf)
         self.metadata.update(
@@ -1705,6 +1823,8 @@ class ProperTransientFinder:
             "matched_stars",
             "ref_fwhm_pixels",
             "new_fwhm_pixels",
+            "reference_psf_radius_used",
+            "science_psf_radius_used",
             "psf_four_sigma_support_pixels",
             "flux_scale",
             "flux_scale_scatter",

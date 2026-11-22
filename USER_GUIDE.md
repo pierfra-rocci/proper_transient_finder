@@ -1222,7 +1222,7 @@ Run `--help` for the installed interface. Defaults below describe this version.
 | `--flux-scale` | Estimated | Known reference multiplier; kernel backend only. |
 | `--no-beta` | Off | Disable photometric scale estimation. Kernel scale is one unless manually supplied. |
 | `--iterative` | Off | More ratio-clipping iterations for kernel; iterative estimation for ProperImage. |
-| `--psf-radius` | `8` | Input PSF kernel radius in pixels; support is `(2r+1)` squared. Automatic Gaussian PSFs must fit their 4σ support within `r + 1` pixels. |
+| `--psf-radius` | `8` | Input PSF kernel radius in pixels; support is `(2r+1)` squared. Automatic Gaussian PSFs use finite, mask-valid isolated-star stamps and must fit their 4σ support within `r + 1` pixels. If too few stamps are usable, fitting tries smaller radii down to 3; it never waives the support check. |
 | `--ref-psf-radius`, `--new-psf-radius` | `--psf-radius` | Per-frame stamp radius for pairs whose sampling or seeing differs, such as a survey template and a finer science grid. Each automatic PSF gets its own 4σ support guard. |
 | `--ref-psf`, `--new-psf` | Estimated Gaussian PSFs | Both supplied PSFs are required together; kernel backend only. |
 | `--ref-mask`, `--new-mask` | None | Additional same-shape input quality masks. |
@@ -1334,7 +1334,7 @@ To see individual test names or investigate one behavior:
 & $Python -m pytest -c $Configuration $AstroTests -q -k properimage
 ```
 
-The current suite expands to 245 test cases, including parameterized invalid
+The current suite expands to 249 test cases, including parameterized invalid
 configuration and preflight checks. It covers:
 
 - Score calibration, preservation of bright sources, and invalid-pixel masks.
@@ -1639,19 +1639,20 @@ Machine: Windows 11, Intel64 Family 6 Model 186 Stepping 2, 20 logical processor
 Python 3.13.14, NumPy 2.5.1, SciPy 1.18.1, Astropy 8.0.1, Astroscrappy 1.3.0.
 One worker at a time, one thread limit per native backend, plots/reprojection off.
 
-**Automatic PSF pilot (2026-11-02) and fix (2026-11-03):** the pilot failed before
-detection because the estimated PSF exceeded radius 8 (22.4-24.7 s at 20 MB,
-61.8-64.3 s at 50 MB). The cause was ProperImage's strict star selection: it logs
-`only had N valid sources (< 15). Keeping all M sources` and then fits the
-Gaussian to every detected source, so the Sersic host, blends and noise peaks
-widened the fit (sigma 3.76 at radius 8, 323 at radius 10). Raising
-`--psf-radius` alone made it worse, because fewer stars pass the cuts at larger
-stamps.
+**Automatic PSF pilot (2026-11-02):** the pilot failed before detection because
+ProperImage's strict star selection logged `only had N valid sources (< 15).
+Keeping all M sources` and fit every detected source. The Sersic host, blends,
+and noise peaks widened the fit (sigma 3.76 at radius 8, 323 at radius 10).
+Increasing the radius did not help because fewer stars passed the cuts.
 
-`ProperTransientFinder._estimate_psf` now seeds ProperImage's source cache with
-the pipeline's isolated SEP stars (already round, unmasked and unblended) and
-lets ProperImage perform the stamp extraction and Gaussian fit. Re-checked clean
-pairs at the default radius 8 with automatic PSFs:
+Automatic PSF estimation now fits Gaussian-plus-background models to the
+pipeline's isolated SEP stars using only finite, mask-valid pixels. The
+requested radius is tried first; it is reduced only when too few valid stamps
+remain, and the final PSF must still pass the four-sigma support and
+normalization checks. The effective reference and science radii are recorded in
+`provenance.json` and `statistics.csv`. The following clean-pair timings and
+recoveries are historical results from the earlier estimator, not a validation
+of the mask-aware implementation:
 
 | FITS per input | Analysis | Reference / science FWHM | Injected FWHM | Recoveries |
 | --- | --- | --- | --- | --- |
@@ -1660,13 +1661,11 @@ pairs at the default radius 8 with automatic PSFs:
 
 Both runs used `PipelineConfig(plots=False)` on one clean scene and one noise
 seed, so this is not a rerun of the 40-case campaign; the detector, trail and
-masked scenes still need their own automatic-PSF pass. The support guard remains
-in force: an automatic Gaussian must fit its 4σ support within one pixel of the
-stamp radius, so a genuinely broad PSF must raise `--psf-radius` (or the
-frame-specific `--ref-psf-radius` / `--new-psf-radius`) rather than be cropped,
-and supplied measured PSFs remain the preferred option for real data. The
-per-frame radii exist for cross-resolution pairs, where one shared radius cannot
-fit both PSFs; they do not relax the support or sampling guards.
+masked scenes still need their own automatic-PSF pass. A genuinely broad PSF
+must still fit the four-sigma support within one pixel of its effective stamp
+radius; use a larger configured radius when adequate valid pixels are available,
+or supply measured PSFs. The per-frame radii support cross-resolution pairs and
+do not relax the support or sampling guards.
 
 **Known-PSF control:** all 40 cases completed. Median/range across all 20 cases
 at each size (null and injected scenes mixed):
