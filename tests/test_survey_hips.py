@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.error import URLError
 from urllib.parse import parse_qs, urlsplit
 
@@ -16,7 +17,7 @@ import pytest
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from proper_transient_finder import survey
+from proper_transient_finder import api, survey
 
 
 def science_image(
@@ -413,11 +414,11 @@ def test_panstarrs_fallback_reprojects_after_every_hips2fits_host_fails(tmp_path
     assert template.metadata["fallback"]["survey"] == "Pan-STARRS"
     assert template.metadata["delivered_band"] == "r"
     assert template.metadata["asinh_linearized"] is False
-    assert template.metadata["acquisition_only"] is True
-    assert template.metadata["photometric_subtraction_allowed"] is False
+    assert template.metadata["acquisition_only"] is False
+    assert template.metadata["photometric_subtraction_allowed"] is True
     warnings = " ".join(template.metadata["warnings"])
     assert "provider-native cutout" in warnings
-    assert "acquisition-only" in warnings
+    assert "experimental fallback" in warnings
     with fits.open(template.fits_path) as hdus:
         assert hdus[0].data.shape == (64, 64)
         assert hdus[0].header["FILTER"] == "r"
@@ -447,7 +448,7 @@ def test_skymapper_siap_fallback_reprojects_downloaded_fits(tmp_path, monkeypatc
     assert query["BAND"] == ["r"]
     assert query["FORMAT"] == ["image/fits"]
     assert template.metadata["fallback"]["survey"] == "SkyMapper"
-    assert template.metadata["acquisition_only"] is True
+    assert template.metadata["acquisition_only"] is False
 
 
 def test_panstarrs_fallback_masks_pixels_outside_the_cutout(tmp_path, monkeypatch):
@@ -469,7 +470,7 @@ def test_panstarrs_fallback_masks_pixels_outside_the_cutout(tmp_path, monkeypatc
         assert hdus["MASK"].data.all()
 
 
-def test_panstarrs_fallback_is_acquisition_only_and_cannot_be_subtracted(tmp_path, monkeypatch):
+def test_panstarrs_fallback_is_used_for_subtraction(tmp_path, monkeypatch):
     science, _ = science_image(tmp_path)
     results = tmp_path / "results"
 
@@ -482,24 +483,34 @@ def test_panstarrs_fallback_is_acquisition_only_and_cannot_be_subtracted(tmp_pat
 
     monkeypatch.setattr(survey, "_download_url", download)
     monkeypatch.setattr(survey, "sleep", lambda *_: None)
-    with pytest.raises(survey.FallbackAcquisitionOnlyError, match="acquisition-only"):
-        survey.compare_survey_images(
-            science,
-            results,
-            template_filter="r",
-            survey="panstarrs",
-            cache_dir=tmp_path / "cache",
-            config={"plots": False},
+
+    def mock_compare(reference, science, output_dir, **kwargs):
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        return SimpleNamespace(
+            output_dir=Path(output_dir),
+            metadata={},
+            candidates=[],
+            rejected_candidates=[],
         )
+
+    monkeypatch.setattr(api, "compare_images", mock_compare)
+    result = survey.compare_survey_images(
+        science,
+        results,
+        template_filter="r",
+        survey="panstarrs",
+        cache_dir=tmp_path / "cache",
+        config={"plots": False},
+    )
     report = json.loads((results / "survey_reference.json").read_text(encoding="utf-8"))
-    assert report["state"] == "acquisition_only"
-    assert report["template"]["acquisition_only"] is True
-    assert report["template"]["photometric_subtraction_allowed"] is False
+    assert report["state"] == "completed"
+    assert report["template"]["acquisition_only"] is False
+    assert report["template"]["photometric_subtraction_allowed"] is True
     assert Path(report["reference_fits"]).is_file()
-    assert not (results / "analysis").exists()
+    assert result.output_dir == results / "analysis"
 
 
-def test_cached_panstarrs_fallback_without_new_flags_stays_acquisition_only(tmp_path, monkeypatch):
+def test_cached_panstarrs_fallback_without_new_flags_is_subtractable(tmp_path, monkeypatch):
     science, _ = science_image(tmp_path)
     request = survey.prepare_template_request(science, "r")
     cache = tmp_path / "cache"
@@ -520,11 +531,11 @@ def test_cached_panstarrs_fallback_without_new_flags_stays_acquisition_only(tmp_
     metadata.pop("photometric_subtraction_allowed")
     manifest.write_text(json.dumps(metadata), encoding="utf-8")
     cached = survey.fetch_survey_template(request, cache)
-    assert cached.metadata["acquisition_only"] is True
-    assert cached.metadata["photometric_subtraction_allowed"] is False
+    assert cached.metadata["acquisition_only"] is False
+    assert cached.metadata["photometric_subtraction_allowed"] is True
 
 
-def test_survey_batch_summary_lists_acquisition_only_templates(tmp_path, monkeypatch):
+def test_survey_batch_summary_lists_completed_provider_fallbacks(tmp_path, monkeypatch):
     first, _ = science_image(tmp_path, name="science_1.fits")
     second, _ = science_image(tmp_path, name="science_2.fits")
     results = tmp_path / "results"
@@ -538,6 +549,17 @@ def test_survey_batch_summary_lists_acquisition_only_templates(tmp_path, monkeyp
 
     monkeypatch.setattr(survey, "_download_url", download)
     monkeypatch.setattr(survey, "sleep", lambda *_: None)
+
+    def mock_compare(reference, science, output_dir, **kwargs):
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        return SimpleNamespace(
+            output_dir=Path(output_dir),
+            metadata={},
+            candidates=[],
+            rejected_candidates=[],
+        )
+
+    monkeypatch.setattr(api, "compare_images", mock_compare)
     report = survey.compare_survey_batch(
         [first, second],
         results,
@@ -546,19 +568,15 @@ def test_survey_batch_summary_lists_acquisition_only_templates(tmp_path, monkeyp
         cache_dir=tmp_path / "cache",
         config={"plots": False},
     )
-    assert report.state == "completed_with_errors"
-    assert [item.state for item in report.items] == ["acquisition_only", "acquisition_only"]
+    assert report.state == "completed"
+    assert [item.state for item in report.items] == ["completed", "completed"]
     status = report.survey_status
-    assert status["acquisition_only_count"] == 2
-    assert {entry["name"] for entry in status["acquisition_only"]} == {
-        "science-0001",
-        "science-0002",
-    }
+    assert status["acquisition_only_count"] == 0
+    assert status["acquisition_only"] == []
     summary = json.loads((results / "batch_summary.json").read_text(encoding="utf-8"))
-    assert summary["survey_status"]["acquisition_only_count"] == 2
-    assert summary["counts"]["acquisition_only"] == 2
-    assert all(Path(entry["reference_fits"]).is_file() for entry in status["acquisition_only"])
-    assert not any((item.output_dir / "analysis").exists() for item in report.items)
+    assert summary["survey_status"]["acquisition_only_count"] == 0
+    assert summary["counts"]["acquisition_only"] == 0
+    assert all(item.reference_fits.is_file() for item in report.items)
 
 
 def test_provider_fallback_is_not_used_for_explicit_identifiers(tmp_path, monkeypatch):

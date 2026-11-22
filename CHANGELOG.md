@@ -4,7 +4,7 @@
 
 - Added provider-native Pan-STARRS and SkyMapper FITS cutout fallbacks after CDS HiPS outages.
 - Restricted provider fallbacks to named providers and supported bands.
-- Kept provider fallbacks acquisition-only and prohibited them from photometric subtraction.
+- Provider fallbacks are now usable by the normal subtraction pipeline and remain experimentally calibrated.
 - Removed the NASA SkyView and DSS2R fallback implementation.
 
 ## 0.3.3

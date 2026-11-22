@@ -165,9 +165,9 @@ the science pixel grid. No local tiling or mosaic is built, and the comparison
 pipeline runs without a second reprojection. If every CDS host fails,
 named-provider requests use the provider-native PS1 or SkyMapper FITS cutout
 service for supported bands. The cutout is reprojected locally onto the science
-grid. Provider fallbacks are acquisition-only: they are cached and reported,
-but the survey pipeline refuses photometric subtraction because cross-provider
-bandpasses and calibration cannot be certified automatically.
+grid. Provider fallbacks are cached and can be used by the normal subtraction
+pipeline, but their cross-provider bandpasses and calibration are explicitly
+marked as unverified and may require independent confirmation.
 First, `--survey auto` selects Pan-STARRS or SkyMapper by declination and band;
 Pan-STARRS is preferred where both nominal coverage areas overlap. The default
 network timeout is 30 seconds per HTTP request. CDS hosts are tried in sequence

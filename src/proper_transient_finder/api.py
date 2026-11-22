@@ -89,8 +89,8 @@ class BatchItemResult:
 class BatchResult:
     """Ordered job records, including failures/skips; success is not scientific confirmation.
 
-    ``survey_status`` is set by survey batches and lists acquisition-only
-    fallback templates that were cached but never subtracted.
+    ``survey_status`` is set by survey batches. Provider fallbacks are normal
+    completed survey jobs; legacy acquisition-only fields remain for compatibility.
     """
 
     items: tuple[BatchItemResult, ...]

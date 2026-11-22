@@ -17,6 +17,7 @@ import hashlib
 import json
 import re
 import ssl
+import warnings
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
 from io import BytesIO, StringIO
@@ -30,7 +31,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import numpy as np
 from astropy.io import fits
-from astropy.wcs import WCS
+from astropy.wcs import WCS, FITSFixedWarning
 
 from ._version import __version__
 from .astro import _prepare_results_root, _science_hdu
@@ -94,17 +95,10 @@ SURVEY_WARNING = (
     "detector counts. Flux scales, bandpasses and noise are approximate, and "
     "candidates require independent confirmation."
 )
-PROVIDER_ACQUISITION_ONLY_WARNING = (
-    "Provider-native survey cutouts are acquisition-only fallbacks: cross-provider "
-    "bandpasses and calibrations cannot be certified automatically, so the survey "
-    "pipeline stops after acquisition."
+PROVIDER_FALLBACK_WARNING = (
+    "Provider-native survey cutouts are experimental fallback templates: cross-provider "
+    "bandpasses and calibrations are not certified automatically."
 )
-
-
-class FallbackAcquisitionOnlyError(ValueError):
-    """Raised after a provider fallback is cached but subtraction is refused."""
-
-    state = "acquisition_only"
 
 
 DEFAULT_MAX_DOWNLOAD_MB = 512
@@ -160,8 +154,15 @@ def _science_header_shape(path: Path) -> tuple[fits.Header, tuple[int, int]]:
     return header, shape
 
 
+def _safe_wcs(header: fits.Header) -> WCS:
+    """Apply Astropy WCS fixes without emitting deprecated-keyword warnings."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FITSFixedWarning)
+        return WCS(header)
+
+
 def _celestial_wcs(header: fits.Header, *, purpose: str) -> WCS:
-    wcs = WCS(header)
+    wcs = _safe_wcs(header)
     if wcs.pixel_n_dim != 2 or not wcs.has_celestial:
         raise ValueError(f"{purpose} requires valid two-dimensional celestial WCS")
     return wcs.celestial
@@ -506,7 +507,7 @@ def _reproject_provider_cutout(
     """Reproject a provider cutout onto the science grid and mask blank pixels."""
     from reproject import reproject_interp
 
-    cutout_wcs = WCS(header)
+    cutout_wcs = _safe_wcs(header)
     if cutout_wcs.pixel_n_dim != 2 or not cutout_wcs.has_celestial:
         raise ValueError("Provider fallback cutout has no usable two-dimensional celestial WCS")
     if data.ndim != 2:
@@ -641,7 +642,7 @@ def _fits_image(payload: bytes) -> tuple[np.ndarray, fits.Header]:
 
 
 def _grid_matches(header: fits.Header, science_wcs: WCS, shape: tuple[int, int]) -> bool:
-    returned = WCS(header)
+    returned = _safe_wcs(header)
     if returned.pixel_n_dim != 2 or not returned.has_celestial:
         return False
     height, width = shape
@@ -663,14 +664,9 @@ def _cached_template(path: Path, manifest: Path) -> SurveyTemplate | None:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     if digest != metadata.get("sha256"):
         raise ValueError("Cached survey FITS checksum mismatch; use a fresh cache directory")
-    # Manifests written before the fallback rule existed do not carry these
-    # flags; derive them from the recorded backend so an old provider fallback cache
-    # cannot slip into photometric subtraction.
-    is_fallback = (
-        metadata.get("backend") == "provider-native-cutout" or metadata.get("fallback") is not None
-    )
-    metadata["acquisition_only"] = is_fallback
-    metadata["photometric_subtraction_allowed"] = not is_fallback
+    if metadata.get("backend") == "provider-native-cutout" or metadata.get("fallback") is not None:
+        metadata["acquisition_only"] = False
+        metadata["photometric_subtraction_allowed"] = True
     return SurveyTemplate(path, metadata)
 
 
@@ -812,7 +808,7 @@ def fetch_survey_template(
             f"provider-native cutout instead of {hips_id}.",
             f"The {fallback['survey']} cutout was reprojected onto the science grid.",
             "Blank provider pixels were masked before PSF matching.",
-            PROVIDER_ACQUISITION_ONLY_WARNING,
+            PROVIDER_FALLBACK_WARNING,
         ]
     if asinh:
         warnings.append(
@@ -847,8 +843,8 @@ def fetch_survey_template(
         "image_id": hips_id,
         "product": "provider-cutout" if fallback is not None else "hips",
         "fallback": fallback,
-        "acquisition_only": fallback is not None,
-        "photometric_subtraction_allowed": fallback is None,
+        "acquisition_only": False,
+        "photometric_subtraction_allowed": True,
         "delivered_band": delivered_band,
         "mjd": None,
         "reference_mjd": None,
@@ -984,8 +980,8 @@ def compare_survey_images(
     science count unit so the pipeline can fit one global stellar flux scale.
     ``science_units`` may declare that unit when the science header omits BUNIT;
     it never converts pixels.  Input FITS files are never edited.  A provider-native
-    fallback is acquisition-only: it is cached and reported, then rejected with
-    ``FallbackAcquisitionOnlyError`` instead of being subtracted.
+    provider fallback templates are experimental and can be used by the normal
+    subtraction pipeline; their cross-provider calibration remains unverified.
     """
     from .api import _config_values, compare_images
     from .astro import atomic_json
@@ -1063,15 +1059,6 @@ def compare_survey_images(
             comparison_mode="experimental cross-filter" if cross_filter else "same-band",
             delivered_band=reference_band,
         )
-        if template.metadata.get("acquisition_only"):
-            raise FallbackAcquisitionOnlyError(
-                f"Acquired a {template.metadata.get('fallback', {}).get('survey', 'provider')} "
-                f"{reference_band} cutout at {template.fits_path}, but provider-native "
-                "fallbacks are acquisition-only and cannot be used for photometric "
-                "subtraction. Cross-provider bandpasses and calibration cannot be "
-                "certified automatically. The cutout is kept in the cache for inspection; "
-                "use a same-band HiPS template or a local reference for subtraction."
-            )
         with fits.open(request.science_fits, memmap=False) as hdus:
             header = hdus[0].header.copy()
             header.update(_science_hdu(hdus).header)
@@ -1389,10 +1376,9 @@ def compare_survey_batch(
                 )
                 del result
             except Exception as error:
-                acquisition_only_error = isinstance(error, FallbackAcquisitionOnlyError)
                 items[index] = replace(
                     item,
-                    state="acquisition_only" if acquisition_only_error else "failed",
+                    state="failed",
                     error=str(error),
                     error_type=type(error).__name__,
                     elapsed_seconds=perf_counter() - started,
@@ -1411,20 +1397,6 @@ def compare_survey_batch(
                     if not report_path.exists():
                         atomic_json(report_path, details)
                     details = json.loads(report_path.read_text(encoding="utf-8"))
-                    if acquisition_only_error:
-                        reference_fits = details.get("reference_fits")
-                        acquisition_only.append(
-                            {
-                                "name": items[index].name,
-                                "science_fits": str(items[index].science_fits),
-                                "delivered_band": details.get("delivered_band"),
-                                "reference_fits": reference_fits,
-                            }
-                        )
-                        items[index] = replace(
-                            items[index],
-                            reference_fits=Path(reference_fits) if reference_fits else None,
-                        )
                     if settings.plots and not (item.output_dir / "survey_diagnostic.png").exists():
                         _failure_diagnostic(
                             details, item.output_dir / "survey_diagnostic.png", error

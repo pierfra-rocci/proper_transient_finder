@@ -468,10 +468,10 @@ retry cycles are attempted before fallback.
 When every CDS host fails, named-provider requests use the provider-native
 FITS cutout service. Pan-STARRS uses `ps1filenames.py` and `fitscut.cgi`;
 SkyMapper uses its DR4 SIAP endpoint. Provider cutouts are reprojected locally
-onto the science grid. They are **acquisition-only**: the cutout is cached and
-reported, but the survey pipeline refuses photometric subtraction because
-cross-provider bandpasses and calibration cannot be certified automatically.
-`fetch_survey_template` still returns the cutout for inspection. Pan-STARRS
+onto the science grid. The cutout is cached and used by the normal subtraction
+pipeline, while provider-specific calibration is flagged as unverified.
+`fetch_survey_template` returns the cutout for inspection or subtraction.
+Pan-STARRS
 supports `g r i z y`; SkyMapper supports `g r i`. Explicit HiPS identifiers,
 unmapped bands, and unsupported provider/band combinations never substitute
 another survey.
@@ -604,15 +604,12 @@ Or use `science.json` containing an array of strings:
 ```
 
 If every CDS host fails and a named provider uses Pan-STARRS or SkyMapper,
-the provider cutout is cached but never subtracted. The CLI ends the run with that table
-and a totals line:
+the provider cutout is cached and passed through the normal subtraction pipeline.
+The provider-specific calibration remains experimental:
 
 ```text
-Survey batch completed_with_errors. Results: C:\results\survey_batch
-Acquisition-only templates (1); no photometric subtraction.
-NAME          BAND   CACHED FITS
-science-0002  r      C:\results\survey_cache\a7aa152d...hips.fits
-Batch totals: completed=1, failed=0, acquisition_only=1
+Survey batch completed. Results: C:\results\survey_batch
+Batch totals: completed=2, failed=0
 ```
 
 Each row names the job, delivered fallback band and cached FITS; `-` marks a
@@ -723,9 +720,8 @@ Single-image results contain:
   record.
 
 Survey batches place these under each generated job directory and add an atomic
-`batch_summary.json` at their root; its `survey_status` block lists any
-acquisition-only provider templates by job name, band and cached FITS path, and
-the CLI prints the same table followed by a `Batch totals` line. Once processing has started, failures produce
+`batch_summary.json` at their root; provider fallback provenance is included
+in each survey reference and the CLI prints a `Batch totals` line. Once processing has started, failures produce
 an explicitly labeled failure diagnostic, not a fabricated blank subtraction.
 Invalid shared options fail before writes; missing/bad per-image inputs are
 recorded as batch failures. `--no-plots` disables PNGs. `--check-only` creates no
@@ -969,8 +965,8 @@ when unavailable), elapsed seconds, error type/message, optional full `result`,
 and optional input-only `preflight` report. `successful` is true only when
 every job completed or every requested input check passed. `check_only`
 distinguishes preflight reports from actual image processing. Survey batches
-also set `survey_status`, which lists acquisition-only fallback templates
-(count, job name, delivered band, cached FITS) that were never subtracted.
+also set `survey_status`, with provider fallback results represented as normal
+completed jobs and the legacy acquisition-only count retained as zero.
 
 For no-write analysis, omit `output_dir`:
 

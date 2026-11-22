@@ -110,8 +110,8 @@ original detector counts: cache-owned copies are labeled with the verified
 science count unit so the pipeline can fit one global stellar flux scale.
 `science_units` may declare that unit when the science header omits BUNIT;
 it never converts pixels.  Input FITS files are never edited.  Provider-native
-Pan-STARRS or SkyMapper fallbacks are acquisition-only: they are cached and reported, then rejected with
-`FallbackAcquisitionOnlyError` instead of being subtracted.
+Pan-STARRS or SkyMapper fallbacks are experimental templates: they are cached and reported,
+and they are passed to the normal subtraction pipeline with calibration explicitly unverified.
 
 ## compare_survey_batch
 
@@ -201,8 +201,8 @@ Per-job status; full image results are optional to bound batch memory usage.
 
 Ordered job records, including failures/skips; success is not scientific confirmation.
 
-`survey_status` is set by survey batches and lists acquisition-only
-fallback templates that were cached but never subtracted.
+`survey_status` is set by survey batches. Provider fallbacks are completed
+survey jobs; the legacy acquisition-only count remains available for compatibility.
 
 | Field | Type | Default |
 | --- | --- | --- |
