@@ -4,7 +4,7 @@
 
 Developed with assistance from ChatGPT, Claude, and Mistral.
 
-Version: `0.3.2`.
+Version: `0.3.3`.
 
 This standalone manual covers the astronomical subtraction pipeline, its
 launcher, its regression tests, and the commands used to run and validate it.
@@ -155,7 +155,7 @@ bash scripts/tasks.sh lint
 bash scripts/tasks.sh test -q -k preflight
 bash scripts/tasks.sh docs --check --build
 bash scripts/tasks.sh build --no-isolation
-bash scripts/tasks.sh verify-install --distribution dist/proper_transient_finder-0.3.2-py3-none-any.whl
+bash scripts/tasks.sh verify-install --distribution dist/proper_transient_finder-0.3.3-py3-none-any.whl
 ```
 
 Its options mirror the PowerShell parameters: `--output-directory` for
@@ -250,7 +250,7 @@ To prepare all runtime and test dependencies for offline installation:
 & (Join-Path $PipelineRoot "scripts\build.ps1") -PythonPath $Python -NoIsolation -IncludeDependencies
 $Dist = Join-Path $PipelineRoot "dist"
 $Wheelhouse = Join-Path $Dist "wheelhouse"
-$Wheel = Join-Path $Dist "proper_transient_finder-0.3.2-py3-none-any.whl"
+$Wheel = Join-Path $Dist "proper_transient_finder-0.3.3-py3-none-any.whl"
 & $Python -m pip install --no-index --find-links $Wheelhouse $Wheel
 ```
 
@@ -265,7 +265,7 @@ Verify a genuine fresh installation, not an editable checkout:
 
 ```powershell
 & (Join-Path $PipelineRoot "scripts\verify_install.ps1") -PythonPath $Python -DistributionPath $Wheel -Wheelhouse $Wheelhouse
-$SourceArchive = Join-Path $Dist "proper_transient_finder-0.3.2.tar.gz"
+$SourceArchive = Join-Path $Dist "proper_transient_finder-0.3.3.tar.gz"
 & (Join-Path $PipelineRoot "scripts\verify_install.ps1") -PythonPath $Python -DistributionPath $SourceArchive -Wheelhouse $Wheelhouse
 ```
 
@@ -460,14 +460,18 @@ transfer cap (`--max-download-mb`, default 512 MB, maximum 512 MB). Large
 frames that exceed it must be cropped or split upstream; the survey mode does
 not assemble mosaics.
 
-When every CDS host fails, named providers fall back to NASA SkyView DSS2
-(`r` → `dss2r`, `g` → `dss2b`, `i` → `dss2ir`). SkyView cuts its own tangent
-grid, so that fallback is reprojected locally onto the science grid and is
-always reported as a cross-filter reference with approximate flux. It is
-**acquisition-only**: the cutout is cached and reported, but the survey
-pipeline refuses photometric subtraction because DSS2 pixel units and bandpass
-cannot supply a calibrated flux scale. `fetch_survey_template` still returns
-the cutout for inspection. Explicit HiPS identifiers and other bands are never
+For `--survey auto`, Pan-STARRS or SkyMapper is selected first from declination
+and the requested band, with Pan-STARRS preferred where both overlap. Each
+network request has a default 30-second socket timeout. All CDS HiPS hosts and
+retry cycles are attempted before fallback.
+
+When every CDS host fails, R-band named-provider requests fall back to NASA
+SkyView DSS2R. SkyView cuts its own tangent grid, so that fallback is
+reprojected locally onto the science grid. It is **acquisition-only**: the
+cutout is cached and reported, but the survey pipeline refuses photometric
+subtraction because DSS2R photographic data and pixel units cannot supply a
+calibrated flux scale. `fetch_survey_template` still returns the cutout for
+inspection. Explicit HiPS identifiers, G/I bands, and unmapped bands are never
 substituted; they fail instead.
 
 `--survey` accepts `auto`, `panstarrs`, `skymapper`, or an explicit HiPS
@@ -475,7 +479,7 @@ identifier such as `PanSTARRS/DR1/i`. `auto` prefers Pan-STARRS where both
 selected-coverage providers are eligible. It chooses using nominal coverage and
 the **requested template band**, not science-filter inference. It does not
 substitute a different requested filter after a service failure; the only
-outage fallback is the SkyView DSS2 product described above. Nominal coverage
+outage fallback is SkyView DSS2R for R requests. Nominal coverage
 is not a guarantee of usable pixels.
 
 Science FITS selection matches the ordinary pipeline: one `SCI` extension wins,
@@ -604,7 +608,7 @@ and a totals line:
 Survey batch completed_with_errors. Results: C:\results\survey_batch
 Acquisition-only templates (1); no photometric subtraction.
 NAME          BAND   CACHED FITS
-science-0002  dss2r  C:\results\survey_cache\a7aa152d...hips.fits
+science-0002  DSS2R  C:\results\survey_cache\a7aa152d...hips.fits
 Batch totals: completed=1, failed=0, acquisition_only=1
 ```
 
@@ -661,8 +665,9 @@ Only the science WCS, image dimensions, HiPS identifier, template band and
 optional science epoch are sent over HTTPS to the CDS HiPS services. Each
 request tries `alaskybis.cds.unistra.fr`, then `alasky.u-strasbg.fr`, then
 `alasky.cds.unistra.fr`, and retries that sequence up to three times, pausing
-briefly between cycles, before trying the NASA SkyView fallback for named
-providers and reporting failure. The fallback sends only the field center,
+briefly between cycles, before trying the NASA SkyView DSS2R fallback for R-band
+named-provider requests. G/I/unmapped bands and explicit HiPS identifiers do not
+fall back to SkyView. The R-band fallback sends only the field center,
 polygon circumference and requested optical band to
 `skyview.gsfc.nasa.gov`. The MOC coverage pre-check uses the same three-host
 order and retry sequence and never applies to the fallback. Science pixels and

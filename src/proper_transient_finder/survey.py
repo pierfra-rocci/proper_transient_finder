@@ -81,10 +81,10 @@ MOC_SERVICE_URLS = (
 # NASA SkyView is used only when no CDS hips2fits host answers.  It cuts its own
 # FITS grid, so the fallback is reprojected locally onto the science WCS.
 SKYVIEW_SERVICE_URL = "https://skyview.gsfc.nasa.gov/cgi-bin/images"
-# SkyView survey substituted per requested optical band.  DSS2 is photographic
-# and covers the whole sky, but it is a different bandpass from the requested
-# HiPS product, so a fallback is always compared as a cross-filter reference.
-SKYVIEW_SURVEYS = {"g": "dss2b", "r": "dss2r", "i": "dss2ir"}
+# SkyView survey substituted only for R-band requests.  DSS2 is photographic
+# and covers the whole sky, but it is not a photometric HiPS product, so a
+# fallback is always acquisition-only rather than a photometric reference.
+SKYVIEW_SURVEYS = {"r": "DSS2R"}
 SKYVIEW_NATIVE_SCALE_ARCSEC = 1.0
 SKYVIEW_MAX_PIXELS = 4_000_000
 SURVEY_WARNING = (
@@ -93,7 +93,7 @@ SURVEY_WARNING = (
     "candidates require independent confirmation."
 )
 SKYVIEW_ACQUISITION_ONLY_WARNING = (
-    "NASA SkyView fallback products are acquisition-only: their DSS2 bandpass and "
+    "The NASA SkyView DSS2R fallback is acquisition-only: its photographic bandpass and "
     "pixel units cannot support a photometric flux scale, so the survey pipeline "
     "stops after acquisition."
 )
@@ -1002,7 +1002,7 @@ def compare_survey_images(
             raise FallbackAcquisitionOnlyError(
                 f"Acquired a NASA SkyView {reference_band} cutout at {template.fits_path}, "
                 "but SkyView fallbacks are acquisition-only and cannot be used for "
-                "photometric subtraction: the DSS2 bandpass and pixel units do not "
+                "photometric subtraction: the DSS2R photographic bandpass and pixel units do not "
                 "support a calibrated flux scale. The cutout is kept in the cache for "
                 "inspection; use a same-band HiPS template or a local reference for "
                 "subtraction."

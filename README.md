@@ -6,7 +6,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/pierfra-rocci/proper_transient_finder)](https://github.com/pierfra-rocci/proper_transient_finder/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/pierfra-rocci/proper_transient_finder)](https://github.com/pierfra-rocci/proper_transient_finder/forks)
 [![GitHub issues](https://img.shields.io/github/issues/pierfra-rocci/proper_transient_finder)](https://github.com/pierfra-rocci/proper_transient_finder/issues)
-[![Version](https://img.shields.io/badge/version-0.3.2-blue)](https://github.com/pierfra-rocci/proper_transient_finder/releases)
+[![Version](https://img.shields.io/badge/version-0.3.3-blue)](https://github.com/pierfra-rocci/proper_transient_finder/releases)
 [![Documentation build](https://github.com/pierfra-rocci/proper_transient_finder/actions/workflows/docs.yml/badge.svg)](https://github.com/pierfra-rocci/proper_transient_finder/actions/workflows/docs.yml)
 
 
@@ -18,7 +18,7 @@ transient-candidate analysis. Python 3.11 or newer is required.
 The distribution is named `proper-transient-finder`; import it as
 `proper_transient_finder`.
 
-Current release: `0.3.2`.
+Current release: `0.3.3`.
 
 Inputs can use `.fits`, `.fit`, `.fts`, gzip compression (`.fits.gz`, `.fit.gz`,
 `.fts.gz`) or FITS tiled compression (`.fits.fz`, `.fit.fz`, `.fts.fz`). No manual
@@ -29,7 +29,7 @@ decompression is required; files must retain their original binary contents.
 Install a built wheel into your chosen Python environment:
 
 ```powershell
-python -m pip install ./dist/proper_transient_finder-0.3.2-py3-none-any.whl
+python -m pip install ./dist/proper_transient_finder-0.3.3-py3-none-any.whl
 python -m pip check
 ```
 
@@ -162,12 +162,16 @@ Opt in to downloading a HiPS survey reference for a science FITS image with
 valid celestial WCS. The library asks the CDS `hips2fits` service for exactly
 the science WCS and shape, so the complete footprint arrives as one cutout on
 the science pixel grid. No local tiling or mosaic is built, and the comparison
-pipeline runs without a second reprojection. If every CDS host fails, named
-providers fall back to a NASA SkyView DSS2 cutout (`r` → `dss2r`, `g` →
-`dss2b`, `i` → `dss2ir`), which is reprojected locally onto the science grid
-and flagged as a cross-filter reference. That fallback is acquisition-only: it
-is cached and reported, but the survey pipeline refuses photometric subtraction
-because DSS2 bandpasses and pixel units cannot supply a calibrated flux scale.
+pipeline runs without a second reprojection. If every CDS host fails, R-band
+named-provider requests fall back to a NASA SkyView DSS2R cutout, which is
+reprojected locally onto the science grid. That fallback is acquisition-only:
+it is cached and reported, but the survey pipeline refuses photometric
+subtraction because DSS2R is photographic and cannot supply a calibrated flux
+scale.
+First, `--survey auto` selects Pan-STARRS or SkyMapper by declination and band;
+Pan-STARRS is preferred where both nominal coverage areas overlap. The default
+network timeout is 30 seconds per HTTP request. CDS hosts are tried in sequence
+and retried in cycles before the R-band DSS2R fallback is considered.
 Explicit HiPS identifiers are never substituted. Choose the template filter
 explicitly:
 
@@ -180,8 +184,8 @@ proper-transient-finder --survey auto --science-list science.txt --template-filt
 `--survey` accepts `auto`, `panstarrs`, `skymapper`, or an explicit HiPS
 identifier such as `PanSTARRS/DR1/i`. Pan-STARRS uses dec >= -30 and supports
 `g r i z y`; SkyMapper DR4 uses dec <= 0 and publishes `g r i` HiPS maps.`auto` prefers Pan-STARRS where both are eligible. It never substitutes a
-different requested filter; the only outage fallback is the SkyView DSS2
-product described above.
+different requested filter; the only outage fallback is SkyView DSS2R for R,
+and G/I/unmapped bands fail instead.
 
 Other CDS HiPS maps can be selected by identifier with one explicit band label:
 
@@ -422,8 +426,8 @@ runs of the same version green, but bump `_version.py` to dry-run changed code.
 2. Commit the change, then tag and push it:
 
 ```bash
-git tag v0.3.2
-git push origin v0.3.2
+git tag v0.3.3
+git push origin v0.3.3
 ```
 
 The build job fails before building if the pushed tag is not `v<version>` taken

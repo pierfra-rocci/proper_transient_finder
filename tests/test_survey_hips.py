@@ -399,11 +399,11 @@ def test_skyview_fallback_reprojects_after_every_hips2fits_host_fails(tmp_path, 
     assert len(calls) == attempts + 1
     query = parse_qs(urlsplit(calls[-1]).query)
     assert urlsplit(calls[-1]).hostname == "skyview.gsfc.nasa.gov"
-    assert query["Survey"] == ["dss2r"]
+    assert query["Survey"] == ["DSS2R"]
     assert query["Return"] == ["FITS"]
     assert template.metadata["service"] == "NASA SkyView"
-    assert template.metadata["fallback"]["survey"] == "dss2r"
-    assert template.metadata["delivered_band"] == "dss2r"
+    assert template.metadata["fallback"]["survey"] == "DSS2R"
+    assert template.metadata["delivered_band"] == "DSS2R"
     assert template.metadata["asinh_linearized"] is False
     assert template.metadata["acquisition_only"] is True
     assert template.metadata["photometric_subtraction_allowed"] is False
@@ -412,7 +412,7 @@ def test_skyview_fallback_reprojects_after_every_hips2fits_host_fails(tmp_path, 
     assert "acquisition-only" in warnings
     with fits.open(template.fits_path) as hdus:
         assert hdus[0].data.shape == (64, 64)
-        assert hdus[0].header["FILTER"] == "dss2r"
+        assert hdus[0].header["FILTER"] == "DSS2R"
         np.testing.assert_allclose(hdus[0].data, 1.0)
 
 
@@ -537,7 +537,7 @@ def test_skyview_fallback_is_not_used_for_explicit_identifiers(tmp_path, monkeyp
 
 @pytest.mark.parametrize(
     ("band", "survey_name"),
-    [("g", "dss2b"), ("r", "dss2r"), ("i", "dss2ir")],
+    [("r", "DSS2R")],
 )
 def test_skyview_fallback_maps_optical_bands(tmp_path, band, survey_name):
     science, _ = science_image(tmp_path)
@@ -562,9 +562,10 @@ def test_missing_science_units_requires_a_declaration():
         survey._science_unit(fits.Header({"FILTER": "r"}), None)
 
 
-def test_skyview_fallback_is_unavailable_for_unmapped_bands(tmp_path):
+@pytest.mark.parametrize("band", ["g", "i", "z"])
+def test_skyview_fallback_is_unavailable_for_unmapped_bands(tmp_path, band):
     science, _ = science_image(tmp_path)
-    assert survey._skyview_survey(survey.prepare_template_request(science, "z")) is None
+    assert survey._skyview_survey(survey.prepare_template_request(science, band)) is None
 
 
 def test_stc_polygon_keeps_longitudes_continuous_across_ra_zero(tmp_path):
