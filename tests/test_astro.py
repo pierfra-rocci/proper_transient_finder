@@ -289,7 +289,7 @@ def test_acquisition_only_cli_table_is_one_line_per_template() -> None:
         [
             {
                 "name": "science-0001",
-                "delivered_band": "DSS2R",
+                "delivered_band": "r",
                 "reference_fits": "cache/a.hips.fits",
             },
             {"name": "science-0002", "delivered_band": None, "reference_fits": None},
@@ -299,7 +299,7 @@ def test_acquisition_only_cli_table_is_one_line_per_template() -> None:
     assert lines[0] == "Acquisition-only templates (2); no photometric subtraction."
     assert lines[1].split() == ["NAME", "BAND", "CACHED", "FITS"]
     assert len(lines) == 4
-    assert lines[2].startswith("science-0001  DSS2R")
+    assert lines[2].startswith("science-0001  r")
     assert lines[2].endswith("cache/a.hips.fits")
     assert "unknown" in lines[3]
     assert lines[3].endswith("  -")

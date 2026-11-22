@@ -12,13 +12,14 @@ the PSF matching, photometry, and candidate vetting.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import re
 import ssl
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import perf_counter, sleep
@@ -62,7 +63,8 @@ SURVEY_HOSTS = {
     "alaskybis.cds.unistra.fr",
     "alasky.u-strasbg.fr",
     "alaskybis.u-strasbg.fr",
-    "skyview.gsfc.nasa.gov",
+    "ps1images.stsci.edu",
+    "api.skymapper.nci.org.au",
 }
 HIPS_SERVICE_URLS = (
     "https://alaskybis.cds.unistra.fr/hips-image-services/hips2fits",
@@ -78,29 +80,29 @@ MOC_SERVICE_URLS = (
     "https://alasky.u-strasbg.fr/MocServer/query",
     "https://alasky.cds.unistra.fr/MocServer/query",
 )
-# NASA SkyView is used only when no CDS hips2fits host answers.  It cuts its own
-# FITS grid, so the fallback is reprojected locally onto the science WCS.
-SKYVIEW_SERVICE_URL = "https://skyview.gsfc.nasa.gov/cgi-bin/images"
-# SkyView survey substituted only for R-band requests.  DSS2 is photographic
-# and covers the whole sky, but it is not a photometric HiPS product, so a
-# fallback is always acquisition-only rather than a photometric reference.
-SKYVIEW_SURVEYS = {"r": "DSS2R"}
-SKYVIEW_NATIVE_SCALE_ARCSEC = 1.0
-SKYVIEW_MAX_PIXELS = 4_000_000
+# Provider-native cutout services are used only after every CDS hips2fits host
+# fails.  Their grids are reprojected locally onto the science WCS.
+PANSTARRS_CUTOUT_URL = "https://ps1images.stsci.edu/cgi-bin/fitscut.cgi"
+PANSTARRS_FILENAMES_URL = "https://ps1images.stsci.edu/cgi-bin/ps1filenames.py"
+SKYMAPPER_SIAP_URL = "https://api.skymapper.nci.org.au/public/siap/dr4/query"
+PROVIDER_FALLBACK_FILTERS = {
+    "panstarrs": frozenset({"g", "r", "i", "z", "y"}),
+    "skymapper": frozenset({"g", "r", "i"}),
+}
 SURVEY_WARNING = (
     "HiPS survey templates are coadded, resampled products rather than original "
     "detector counts. Flux scales, bandpasses and noise are approximate, and "
     "candidates require independent confirmation."
 )
-SKYVIEW_ACQUISITION_ONLY_WARNING = (
-    "The NASA SkyView DSS2R fallback is acquisition-only: its photographic bandpass and "
-    "pixel units cannot support a photometric flux scale, so the survey pipeline "
-    "stops after acquisition."
+PROVIDER_ACQUISITION_ONLY_WARNING = (
+    "Provider-native survey cutouts are acquisition-only fallbacks: cross-provider "
+    "bandpasses and calibrations cannot be certified automatically, so the survey "
+    "pipeline stops after acquisition."
 )
 
 
 class FallbackAcquisitionOnlyError(ValueError):
-    """Raised after a SkyView fallback is cached but subtraction is refused."""
+    """Raised after a provider fallback is cached but subtraction is refused."""
 
     state = "acquisition_only"
 
@@ -385,73 +387,135 @@ def _download_hips(request: TemplateRequest, timeout: float, limit: int) -> tupl
     raise URLError("HiPS download failed for every service host: " + "; ".join(failures))
 
 
-def _skyview_survey(request: TemplateRequest) -> str | None:
-    """Return the SkyView survey substituted when no CDS cutout host answers.
-
-    Only named providers are substituted.  An explicit HiPS identifier pins one
-    published product, so it is never silently replaced by a different survey.
-    """
+def _provider_fallback(request: TemplateRequest) -> str | None:
+    """Return the provider-native fallback name for a named provider and band."""
     if "/" in request.survey:
         return None
-    return SKYVIEW_SURVEYS.get(request.template_filter)
+    if request.survey not in PROVIDER_FALLBACK_FILTERS:
+        return None
+    if request.template_filter not in PROVIDER_FALLBACK_FILTERS[request.survey]:
+        return None
+    return request.survey
 
 
-def _skyview_url(request: TemplateRequest, wcs: WCS) -> tuple[str, str]:
-    """Return the SkyView cutout URL and survey name for a named provider."""
-    survey_name = _skyview_survey(request)
-    if survey_name is None:
-        raise ValueError("Requested survey/band has no SkyView fallback product")
-    scales = wcs.proj_plane_pixel_scales()
-    pixel_scale = max(
-        max(float(scale.to_value("deg")) for scale in scales) * 3600.0,
-        SKYVIEW_NATIVE_SCALE_ARCSEC,
-    )
-    pixels = int(np.ceil(request.size_deg * 3600.0 / pixel_scale))
-    pixels = min(max(pixels, 32), int(np.sqrt(SKYVIEW_MAX_PIXELS)))
+def _panstarrs_filenames_url(request: TemplateRequest) -> str:
     parameters = {
-        "Survey": survey_name,
-        "Position": f"{request.ra_deg:.8f},{request.dec_deg:.8f}",
-        "Size": f"{request.size_deg:.8f}",
-        "Pixels": str(pixels),
-        "Projection": "Tan",
-        "Coordinates": "J2000",
-        "Return": "FITS",
+        "ra": f"{request.ra_deg:.8f}",
+        "dec": f"{request.dec_deg:.8f}",
+        "filters": request.template_filter,
+        "type": "stack",
+        "sep": ",",
     }
-    return SKYVIEW_SERVICE_URL + "?" + urlencode(parameters), survey_name
+    return PANSTARRS_FILENAMES_URL + "?" + urlencode(parameters)
 
 
-def _download_skyview(
-    request: TemplateRequest, wcs: WCS, timeout: float, limit: int
+def _panstarrs_cutout_url(request: TemplateRequest, filename: str) -> str:
+    pixels = int(np.ceil(request.size_deg * 3600.0 / 0.25))
+    pixels = min(max(pixels, 32), 6000)
+    parameters = {
+        "size": str(pixels),
+        "format": "fits",
+        "ra": f"{request.ra_deg:.8f}",
+        "dec": f"{request.dec_deg:.8f}",
+        "red": filename,
+    }
+    return PANSTARRS_CUTOUT_URL + "?" + urlencode(parameters)
+
+
+def _skymapper_url(request: TemplateRequest) -> str:
+    size = f"{request.size_deg:.8f}"
+    parameters = {
+        "POS": f"{request.ra_deg:.8f},{request.dec_deg:.8f}",
+        "SIZE": size,
+        "BAND": request.template_filter,
+        "FORMAT": "image/fits",
+        "INTERSECT": "COVERS",
+        "RESPONSEFORMAT": "CSV",
+        "VERB": "3",
+    }
+    return SKYMAPPER_SIAP_URL + "?" + urlencode(parameters)
+
+
+def _panstarrs_filename(payload: bytes, band: str) -> str:
+    text = payload.decode("utf-8", errors="replace").strip()
+    if not text:
+        raise URLError("Pan-STARRS filename service returned no images")
+    reader = csv.DictReader(StringIO(text), skipinitialspace=True)
+    if reader.fieldnames is None:
+        raise URLError("Pan-STARRS filename service returned an invalid table")
+    reader.fieldnames = [name.strip() for name in reader.fieldnames]
+    for row in reader:
+        if str(row.get("filter", "")).strip().casefold() == band.casefold():
+            filename = str(row.get("filename", "")).strip()
+            if filename.startswith("/") and not any(character.isspace() for character in filename):
+                return filename
+    raise URLError(f"Pan-STARRS filename service returned no stack image for band {band}")
+
+
+def _skymapper_fits_url(payload: bytes) -> str:
+    text = payload.decode("utf-8", errors="replace").strip()
+    if not text:
+        raise URLError("SkyMapper SIAP service returned no cutouts")
+    reader = csv.DictReader(StringIO(text), skipinitialspace=True)
+    if reader.fieldnames is None:
+        raise URLError("SkyMapper SIAP service returned an invalid table")
+    reader.fieldnames = [name.strip().casefold() for name in reader.fieldnames]
+    for row in reader:
+        normalized = {str(key).strip().casefold(): str(value).strip() for key, value in row.items()}
+        for key in ("get_fits", "get_image", "access_url"):
+            url = normalized.get(key)
+            if url:
+                parsed = urlsplit(url)
+                if parsed.scheme == "https" and parsed.hostname in SURVEY_HOSTS:
+                    return url
+    raise URLError("SkyMapper SIAP service returned no downloadable FITS cutout")
+
+
+def _download_provider_fallback(
+    request: TemplateRequest, timeout: float, limit: int
 ) -> tuple[bytes, str, str]:
-    """Fetch a SkyView fallback cutout after every CDS hips2fits host failed."""
-    url, survey_name = _skyview_url(request, wcs)
+    """Fetch a provider-native cutout after every CDS hips2fits host failed."""
+    provider = _provider_fallback(request)
+    if provider is None:
+        raise ValueError("Requested survey/band has no provider-native fallback")
     failures = []
     for attempt in range(SERVICE_ATTEMPTS):
         if attempt:
             sleep(HIPS_RETRY_DELAY_SECONDS)
         try:
-            return _download_url(url, timeout, limit), url, survey_name
+            if provider == "panstarrs":
+                filenames_url = _panstarrs_filenames_url(request)
+                filenames = _download_url(filenames_url, timeout, limit)
+                filename = _panstarrs_filename(filenames, request.template_filter)
+                cutout_url = _panstarrs_cutout_url(request, filename)
+                payload = _download_url(cutout_url, timeout, limit)
+                return payload, cutout_url, "Pan-STARRS"
+            siaps_url = _skymapper_url(request)
+            listing = _download_url(siaps_url, timeout, limit)
+            cutout_url = _skymapper_fits_url(listing)
+            payload = _download_url(cutout_url, timeout, limit)
+            return payload, cutout_url, "SkyMapper"
         except OSError as error:
-            failures.append(f"{urlsplit(url).hostname}: {error}")
-    raise URLError("NASA SkyView fallback failed: " + "; ".join(failures))
+            failures.append(f"{provider}: {error}")
+    raise URLError(f"{provider} provider fallback failed: " + "; ".join(failures))
 
 
-def _reproject_skyview(
+def _reproject_provider_cutout(
     data: np.ndarray, header: fits.Header, science_wcs: WCS, shape: tuple[int, int]
 ) -> np.ndarray:
-    """Reproject a SkyView cutout onto the science grid and mask blank pixels."""
+    """Reproject a provider cutout onto the science grid and mask blank pixels."""
     from reproject import reproject_interp
 
     cutout_wcs = WCS(header)
     if cutout_wcs.pixel_n_dim != 2 or not cutout_wcs.has_celestial:
-        raise ValueError("SkyView fallback cutout has no usable two-dimensional celestial WCS")
+        raise ValueError("Provider fallback cutout has no usable two-dimensional celestial WCS")
     if data.ndim != 2:
-        raise ValueError("SkyView fallback cutout is not a two-dimensional image")
+        raise ValueError("Provider fallback cutout is not a two-dimensional image")
     projected, footprint = reproject_interp(
         (data, cutout_wcs.celestial), science_wcs, shape_out=shape
     )
     projected = np.asarray(projected, dtype=float)
-    # SkyView writes zero into pixels it has no data for.
+    # Provider services may encode uncovered pixels as zero.
     covered = (np.asarray(footprint) > 0) & (projected != 0)
     return np.where(covered, projected, np.nan)
 
@@ -600,9 +664,11 @@ def _cached_template(path: Path, manifest: Path) -> SurveyTemplate | None:
     if digest != metadata.get("sha256"):
         raise ValueError("Cached survey FITS checksum mismatch; use a fresh cache directory")
     # Manifests written before the fallback rule existed do not carry these
-    # flags; derive them from the recorded backend so an old SkyView cache
+    # flags; derive them from the recorded backend so an old provider fallback cache
     # cannot slip into photometric subtraction.
-    is_fallback = metadata.get("backend") == "nasa-skyview" or metadata.get("fallback") is not None
+    is_fallback = (
+        metadata.get("backend") == "provider-native-cutout" or metadata.get("fallback") is not None
+    )
     metadata["acquisition_only"] = is_fallback
     metadata["photometric_subtraction_allowed"] = not is_fallback
     return SurveyTemplate(path, metadata)
@@ -678,25 +744,23 @@ def fetch_survey_template(
         payload, query_url, hips_id = _download_hips(request, timeout, limit)
         service = "CDS hips2fits"
     except OSError as hips_error:
-        if _skyview_survey(request) is None:
+        if _provider_fallback(request) is None:
             raise
         try:
-            payload, query_url, survey_name = _download_skyview(
-                request, science_wcs, timeout, limit
-            )
+            payload, query_url, survey_name = _download_provider_fallback(request, timeout, limit)
         except OSError as fallback_error:
             raise URLError(
-                f"{hips_error}; the NASA SkyView fallback also failed: {fallback_error}"
+                f"{hips_error}; the provider-native fallback also failed: {fallback_error}"
             ) from fallback_error
         fallback = {
             "survey": survey_name,
             "reason": "CDS hips2fits hosts did not respond",
             "reprojected": True,
         }
-        service = "NASA SkyView"
+        service = f"{survey_name} cutout"
     data, header = _fits_image(payload)
     if fallback is not None:
-        data = _reproject_skyview(data, header, science_wcs, shape)
+        data = _reproject_provider_cutout(data, header, science_wcs, shape)
     elif data.shape != shape:
         raise ValueError(
             f"Downloaded HiPS template shape {data.shape} does not match the science grid {shape}"
@@ -705,7 +769,7 @@ def fetch_survey_template(
         raise ValueError("Downloaded HiPS template does not match the science pixel grid")
     native_filter = str(header.get("FILTER", "")).strip()
     native_bunit = str(header.get("BUNIT", "")).strip()
-    delivered_band = fallback["survey"] if fallback is not None else request.template_filter
+    delivered_band = request.template_filter
     asinh = fallback is None and _uses_asinh(hips_id)
     if asinh:
         data = _linearize_asinh(data)
@@ -730,8 +794,11 @@ def fetch_survey_template(
     header["HIPS"] = (hips_id, "Requested HiPS template identifier")
     header["HIPSASIN"] = (asinh, "Pan-STARRS asinh values were linearized")
     if fallback is not None:
-        header["SKYSURV"] = (fallback["survey"], "SkyView fallback survey")
-        header.add_history("NASA SkyView fallback cutout reprojected onto the science pixel grid.")
+        header["PROVIDER"] = (fallback["survey"], "Provider-native fallback survey")
+        header.add_history(
+            f"{fallback['survey']} provider fallback cutout reprojected onto "
+            "the science pixel grid."
+        )
     else:
         header.add_history("HiPS template projected onto the science pixel grid by CDS hips2fits.")
     warnings = [
@@ -741,13 +808,11 @@ def fetch_survey_template(
     ]
     if fallback is not None:
         warnings += [
-            f"CDS hips2fits did not respond; the template is a NASA SkyView "
-            f"{fallback['survey']} cutout instead of {hips_id}.",
-            "The SkyView fallback is a different survey and bandpass from the requested "
-            "HiPS; it was reprojected onto the science grid and is compared as a "
-            "cross-filter reference with only approximate flux scales.",
-            "Blank SkyView pixels were masked before PSF matching.",
-            SKYVIEW_ACQUISITION_ONLY_WARNING,
+            f"CDS hips2fits did not respond; the template is a {fallback['survey']} "
+            f"provider-native cutout instead of {hips_id}.",
+            f"The {fallback['survey']} cutout was reprojected onto the science grid.",
+            "Blank provider pixels were masked before PSF matching.",
+            PROVIDER_ACQUISITION_ONLY_WARNING,
         ]
     if asinh:
         warnings.append(
@@ -767,7 +832,7 @@ def fetch_survey_template(
         )
     if fallback is not None:
         warnings.append(
-            "The SkyView cutout does not declare FILTER; the fallback survey name is used "
+            "The provider cutout does not declare FILTER; the fallback survey name is used "
             "as the band label."
         )
     elif not native_filter:
@@ -778,9 +843,9 @@ def fetch_survey_template(
         **identity,
         "query_url": query_url,
         "service": service,
-        "backend": "nasa-skyview" if fallback is not None else "cds-hips2fits",
+        "backend": "provider-native-cutout" if fallback is not None else "cds-hips2fits",
         "image_id": hips_id,
-        "product": "skyview-cutout" if fallback is not None else "hips",
+        "product": "provider-cutout" if fallback is not None else "hips",
         "fallback": fallback,
         "acquisition_only": fallback is not None,
         "photometric_subtraction_allowed": fallback is None,
@@ -918,7 +983,7 @@ def compare_survey_images(
     original detector counts: cache-owned copies are labeled with the verified
     science count unit so the pipeline can fit one global stellar flux scale.
     ``science_units`` may declare that unit when the science header omits BUNIT;
-    it never converts pixels.  Input FITS files are never edited.  A NASA SkyView
+    it never converts pixels.  Input FITS files are never edited.  A provider-native
     fallback is acquisition-only: it is cached and reported, then rejected with
     ``FallbackAcquisitionOnlyError`` instead of being subtracted.
     """
@@ -1000,12 +1065,12 @@ def compare_survey_images(
         )
         if template.metadata.get("acquisition_only"):
             raise FallbackAcquisitionOnlyError(
-                f"Acquired a NASA SkyView {reference_band} cutout at {template.fits_path}, "
-                "but SkyView fallbacks are acquisition-only and cannot be used for "
-                "photometric subtraction: the DSS2R photographic bandpass and pixel units do not "
-                "support a calibrated flux scale. The cutout is kept in the cache for "
-                "inspection; use a same-band HiPS template or a local reference for "
-                "subtraction."
+                f"Acquired a {template.metadata.get('fallback', {}).get('survey', 'provider')} "
+                f"{reference_band} cutout at {template.fits_path}, but provider-native "
+                "fallbacks are acquisition-only and cannot be used for photometric "
+                "subtraction. Cross-provider bandpasses and calibration cannot be "
+                "certified automatically. The cutout is kept in the cache for inspection; "
+                "use a same-band HiPS template or a local reference for subtraction."
             )
         with fits.open(request.science_fits, memmap=False) as hdus:
             header = hdus[0].header.copy()

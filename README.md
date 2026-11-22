@@ -162,16 +162,16 @@ Opt in to downloading a HiPS survey reference for a science FITS image with
 valid celestial WCS. The library asks the CDS `hips2fits` service for exactly
 the science WCS and shape, so the complete footprint arrives as one cutout on
 the science pixel grid. No local tiling or mosaic is built, and the comparison
-pipeline runs without a second reprojection. If every CDS host fails, R-band
-named-provider requests fall back to a NASA SkyView DSS2R cutout, which is
-reprojected locally onto the science grid. That fallback is acquisition-only:
-it is cached and reported, but the survey pipeline refuses photometric
-subtraction because DSS2R is photographic and cannot supply a calibrated flux
-scale.
+pipeline runs without a second reprojection. If every CDS host fails,
+named-provider requests use the provider-native PS1 or SkyMapper FITS cutout
+service for supported bands. The cutout is reprojected locally onto the science
+grid. Provider fallbacks are acquisition-only: they are cached and reported,
+but the survey pipeline refuses photometric subtraction because cross-provider
+bandpasses and calibration cannot be certified automatically.
 First, `--survey auto` selects Pan-STARRS or SkyMapper by declination and band;
 Pan-STARRS is preferred where both nominal coverage areas overlap. The default
 network timeout is 30 seconds per HTTP request. CDS hosts are tried in sequence
-and retried in cycles before the R-band DSS2R fallback is considered.
+and retried in cycles before the provider-native cutout fallback is considered.
 Explicit HiPS identifiers are never substituted. Choose the template filter
 explicitly:
 
@@ -184,8 +184,8 @@ proper-transient-finder --survey auto --science-list science.txt --template-filt
 `--survey` accepts `auto`, `panstarrs`, `skymapper`, or an explicit HiPS
 identifier such as `PanSTARRS/DR1/i`. Pan-STARRS uses dec >= -30 and supports
 `g r i z y`; SkyMapper DR4 uses dec <= 0 and publishes `g r i` HiPS maps.`auto` prefers Pan-STARRS where both are eligible. It never substitutes a
-different requested filter; the only outage fallback is SkyView DSS2R for R,
-and G/I/unmapped bands fail instead.
+different requested filter; Pan-STARRS supports `g r i z y` fallbacks and
+SkyMapper supports `g r i` fallbacks. Other bands fail instead.
 
 Other CDS HiPS maps can be selected by identifier with one explicit band label:
 

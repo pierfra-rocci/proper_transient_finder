@@ -465,21 +465,24 @@ and the requested band, with Pan-STARRS preferred where both overlap. Each
 network request has a default 30-second socket timeout. All CDS HiPS hosts and
 retry cycles are attempted before fallback.
 
-When every CDS host fails, R-band named-provider requests fall back to NASA
-SkyView DSS2R. SkyView cuts its own tangent grid, so that fallback is
-reprojected locally onto the science grid. It is **acquisition-only**: the
-cutout is cached and reported, but the survey pipeline refuses photometric
-subtraction because DSS2R photographic data and pixel units cannot supply a
-calibrated flux scale. `fetch_survey_template` still returns the cutout for
-inspection. Explicit HiPS identifiers, G/I bands, and unmapped bands are never
-substituted; they fail instead.
+When every CDS host fails, named-provider requests use the provider-native
+FITS cutout service. Pan-STARRS uses `ps1filenames.py` and `fitscut.cgi`;
+SkyMapper uses its DR4 SIAP endpoint. Provider cutouts are reprojected locally
+onto the science grid. They are **acquisition-only**: the cutout is cached and
+reported, but the survey pipeline refuses photometric subtraction because
+cross-provider bandpasses and calibration cannot be certified automatically.
+`fetch_survey_template` still returns the cutout for inspection. Pan-STARRS
+supports `g r i z y`; SkyMapper supports `g r i`. Explicit HiPS identifiers,
+unmapped bands, and unsupported provider/band combinations never substitute
+another survey.
 
 `--survey` accepts `auto`, `panstarrs`, `skymapper`, or an explicit HiPS
 identifier such as `PanSTARRS/DR1/i`. `auto` prefers Pan-STARRS where both
 selected-coverage providers are eligible. It chooses using nominal coverage and
 the **requested template band**, not science-filter inference. It does not
-substitute a different requested filter after a service failure; the only
-outage fallback is SkyView DSS2R for R requests. Nominal coverage
+substitute a different requested filter after a service failure. Provider
+fallback services are used only for supported named-provider/band pairs.
+Nominal coverage
 is not a guarantee of usable pixels.
 
 Science FITS selection matches the ordinary pipeline: one `SCI` extension wins,
@@ -600,15 +603,15 @@ Or use `science.json` containing an array of strings:
 & $Python $PipelineScript --survey auto --science-list science.txt --template-filter g --template-units adu --output "C:\results\survey_batch"
 ```
 
-If every CDS host fails and a named provider falls back to NASA SkyView, the
-template is cached but never subtracted. The CLI ends the run with that table
+If every CDS host fails and a named provider uses Pan-STARRS or SkyMapper,
+the provider cutout is cached but never subtracted. The CLI ends the run with that table
 and a totals line:
 
 ```text
 Survey batch completed_with_errors. Results: C:\results\survey_batch
 Acquisition-only templates (1); no photometric subtraction.
 NAME          BAND   CACHED FITS
-science-0002  DSS2R  C:\results\survey_cache\a7aa152d...hips.fits
+science-0002  r      C:\results\survey_cache\a7aa152d...hips.fits
 Batch totals: completed=1, failed=0, acquisition_only=1
 ```
 
@@ -665,14 +668,13 @@ Only the science WCS, image dimensions, HiPS identifier, template band and
 optional science epoch are sent over HTTPS to the CDS HiPS services. Each
 request tries `alaskybis.cds.unistra.fr`, then `alasky.u-strasbg.fr`, then
 `alasky.cds.unistra.fr`, and retries that sequence up to three times, pausing
-briefly between cycles, before trying the NASA SkyView DSS2R fallback for R-band
-named-provider requests. G/I/unmapped bands and explicit HiPS identifiers do not
-fall back to SkyView. The R-band fallback sends only the field center,
-polygon circumference and requested optical band to
-`skyview.gsfc.nasa.gov`. The MOC coverage pre-check uses the same three-host
+briefly between cycles, before trying the provider-native fallback for supported
+named-provider/band pairs. Pan-STARRS uses `ps1images.stsci.edu`; SkyMapper uses
+`api.skymapper.nci.org.au`. Explicit HiPS identifiers and unmapped bands do not
+use provider fallbacks. The MOC coverage pre-check uses the same three-host
 order and retry sequence and never applies to the fallback. Science pixels and
 local paths are not uploaded. Requests and redirects are restricted to these
-hosts (plus the other `alasky` mirrors and `skyview.gsfc.nasa.gov`); TLS
+hosts (plus the other `alasky` mirrors and the provider hosts); TLS
 verification stays enabled. The default network
 socket timeout is 30 seconds; FITS responses are limited to 512 MB by default,
 and the configurable maximum is also 512 MB. The timeout is not a total-run
@@ -722,7 +724,7 @@ Single-image results contain:
 
 Survey batches place these under each generated job directory and add an atomic
 `batch_summary.json` at their root; its `survey_status` block lists any
-acquisition-only SkyView templates by job name, band and cached FITS path, and
+acquisition-only provider templates by job name, band and cached FITS path, and
 the CLI prints the same table followed by a `Batch totals` line. Once processing has started, failures produce
 an explicitly labeled failure diagnostic, not a fabricated blank subtraction.
 Invalid shared options fail before writes; missing/bad per-image inputs are
@@ -1336,7 +1338,7 @@ To see individual test names or investigate one behavior:
 & $Python -m pytest -c $Configuration $AstroTests -q -k properimage
 ```
 
-The current suite expands to 243 test cases, including parameterized invalid
+The current suite expands to 245 test cases, including parameterized invalid
 configuration and preflight checks. It covers:
 
 - Score calibration, preservation of bright sources, and invalid-pixel masks.

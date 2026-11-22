@@ -109,8 +109,8 @@ availability, calibration, overlap or detectability.  HiPS pixels are not
 original detector counts: cache-owned copies are labeled with the verified
 science count unit so the pipeline can fit one global stellar flux scale.
 `science_units` may declare that unit when the science header omits BUNIT;
-it never converts pixels.  Input FITS files are never edited.  A NASA SkyView
-fallback is acquisition-only: it is cached and reported, then rejected with
+it never converts pixels.  Input FITS files are never edited.  Provider-native
+Pan-STARRS or SkyMapper fallbacks are acquisition-only: they are cached and reported, then rejected with
 `FallbackAcquisitionOnlyError` instead of being subtracted.
 
 ## compare_survey_batch
