@@ -20,6 +20,7 @@ coverage.xml
 htmlcov/
 site/
 survey_cache/
+survey_cache/*
 
 # Tooling and editor files
 .mypy_cache/
@@ -34,9 +35,9 @@ survey_cache/
 *.fits
 *.fit
 freebuff*
-prepared_reference_retry/survey_mosaic.json
-prepared_reference_retry_2/survey_mosaic.json
-prepared_reference_retry_3/survey_mosaic.json
-results/mosaic_001/pipeline.log
-results/mosaic_001/run_status.json
-prepared_reference_retry_4/survey_mosaic.json
+prepared_reference_retry/
+prepared_reference_retry_2/*
+prepared_reference_retry_3/
+results/*
+results_2/*
+resuts/
