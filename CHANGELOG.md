@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.4.1
+
+- Allow provider-native Pan-STARRS and SkyMapper fallbacks through subtraction, with experimental calibration caveats.
+- Replace mask-expanding automatic PSF extraction with finite, mask-aware isolated-star fits and bounded radius reduction.
+- Improve registration RMS guidance when alignment has already been attempted.
+
 ## 0.3.4
 
 - Added provider-native Pan-STARRS and SkyMapper FITS cutout fallbacks after CDS HiPS outages.

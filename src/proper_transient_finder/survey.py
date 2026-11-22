@@ -979,9 +979,9 @@ def compare_survey_images(
     original detector counts: cache-owned copies are labeled with the verified
     science count unit so the pipeline can fit one global stellar flux scale.
     ``science_units`` may declare that unit when the science header omits BUNIT;
-    it never converts pixels.  Input FITS files are never edited.  A provider-native
-    provider fallback templates are experimental and can be used by the normal
-    subtraction pipeline; their cross-provider calibration remains unverified.
+    it never converts pixels.  Input FITS files are never edited.  Provider-native
+    fallback templates are experimental and can be used by the normal subtraction
+    pipeline; their cross-provider calibration remains unverified.
     """
     from .api import _config_values, compare_images
     from .astro import atomic_json

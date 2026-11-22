@@ -3,4 +3,4 @@
 
 """Package version shared by the library and distribution metadata."""
 
-__version__ = "0.3.4"
+__version__ = "0.3.4.1"
