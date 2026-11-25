@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.4.2
+
+- Mosaic Pan-STARRS provider fallback skycells across the full science footprint and bypass the 6000-pixel cutout limit.
+- Retry SkyMapper's documented `get_image` FITS route when another SIAP FITS link fails.
+- Version provider-template cache entries so incomplete earlier cutouts are not reused.
+- Document provider fallback behavior, SkyMapper FITS-route retries, and service size limits.
+
 ## 0.3.4.1
 
 - Allow provider-native Pan-STARRS and SkyMapper fallbacks through subtraction, with experimental calibration caveats.

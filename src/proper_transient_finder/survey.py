@@ -3,11 +3,12 @@
 
 """Opt-in HiPS survey reference acquisition around the comparison pipeline.
 
-Templates are requested from the CDS ``hips2fits`` service on the exact
-science pixel grid (WCS and shape), so no local mosaic or a second
-reprojection is required.  The module only prepares cache-owned FITS copies;
-the science input is never edited and the ordinary comparison pipeline performs
-the PSF matching, photometry, and candidate vetting.
+Templates are requested from the CDS ``hips2fits`` service on the exact science
+pixel grid (WCS and shape). If CDS is unavailable, supported named providers
+can supply a FITS cutout or tile mosaic that is reprojected locally. The module
+only prepares cache-owned FITS copies; the science input is never edited and
+the ordinary comparison pipeline performs PSF matching, photometry, and
+candidate vetting.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from tempfile import NamedTemporaryFile
 from time import perf_counter, sleep
 from typing import TYPE_CHECKING, Any
 from urllib.error import URLError
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import numpy as np
@@ -85,6 +86,7 @@ MOC_SERVICE_URLS = (
 # fails.  Their grids are reprojected locally onto the science WCS.
 PANSTARRS_CUTOUT_URL = "https://ps1images.stsci.edu/cgi-bin/fitscut.cgi"
 PANSTARRS_FILENAMES_URL = "https://ps1images.stsci.edu/cgi-bin/ps1filenames.py"
+PANSTARRS_IMAGE_URL = "https://ps1images.stsci.edu"
 SKYMAPPER_SIAP_URL = "https://api.skymapper.nci.org.au/public/siap/dr4/query"
 PROVIDER_FALLBACK_FILTERS = {
     "panstarrs": frozenset({"g", "r", "i", "z", "y"}),
@@ -103,6 +105,8 @@ PROVIDER_FALLBACK_WARNING = (
 
 DEFAULT_MAX_DOWNLOAD_MB = 512
 _GRID_TOLERANCE_DEG = 1e-5
+_TEMPLATE_CACHE_VERSION = 3
+_PANSTARRS_SAMPLE_SPACING_DEG = 0.2
 _BAND_TOKEN = re.compile(r"[A-Za-z]\d?")
 _EXPLICIT_BAND_MAX_LENGTH = 16
 _MOC_RESPONSE_LIMIT = 1_000_000
@@ -399,10 +403,12 @@ def _provider_fallback(request: TemplateRequest) -> str | None:
     return request.survey
 
 
-def _panstarrs_filenames_url(request: TemplateRequest) -> str:
+def _panstarrs_filenames_url(
+    request: TemplateRequest, *, ra_deg: float | None = None, dec_deg: float | None = None
+) -> str:
     parameters = {
-        "ra": f"{request.ra_deg:.8f}",
-        "dec": f"{request.dec_deg:.8f}",
+        "ra": f"{request.ra_deg if ra_deg is None else ra_deg:.8f}",
+        "dec": f"{request.dec_deg if dec_deg is None else dec_deg:.8f}",
         "filters": request.template_filter,
         "type": "stack",
         "sep": ",",
@@ -410,14 +416,21 @@ def _panstarrs_filenames_url(request: TemplateRequest) -> str:
     return PANSTARRS_FILENAMES_URL + "?" + urlencode(parameters)
 
 
-def _panstarrs_cutout_url(request: TemplateRequest, filename: str) -> str:
-    pixels = int(np.ceil(request.size_deg * 3600.0 / 0.25))
+def _panstarrs_cutout_url(
+    request: TemplateRequest,
+    filename: str,
+    *,
+    ra_deg: float | None = None,
+    dec_deg: float | None = None,
+    size_pixels: int | None = None,
+) -> str:
+    pixels = size_pixels or int(np.ceil(request.size_deg * 3600.0 / 0.25))
     pixels = min(max(pixels, 32), 6000)
     parameters = {
         "size": str(pixels),
         "format": "fits",
-        "ra": f"{request.ra_deg:.8f}",
-        "dec": f"{request.dec_deg:.8f}",
+        "ra": f"{request.ra_deg if ra_deg is None else ra_deg:.8f}",
+        "dec": f"{request.dec_deg if dec_deg is None else dec_deg:.8f}",
         "red": filename,
     }
     return PANSTARRS_CUTOUT_URL + "?" + urlencode(parameters)
@@ -437,7 +450,9 @@ def _skymapper_url(request: TemplateRequest) -> str:
     return SKYMAPPER_SIAP_URL + "?" + urlencode(parameters)
 
 
-def _panstarrs_filename(payload: bytes, band: str) -> str:
+def _panstarrs_image_records(
+    payload: bytes, band: str, *, fallback_ra: float, fallback_dec: float
+) -> list[tuple[str, float, float]]:
     text = payload.decode("utf-8", errors="replace").strip()
     if not text:
         raise URLError("Pan-STARRS filename service returned no images")
@@ -445,15 +460,68 @@ def _panstarrs_filename(payload: bytes, band: str) -> str:
     if reader.fieldnames is None:
         raise URLError("Pan-STARRS filename service returned an invalid table")
     reader.fieldnames = [name.strip() for name in reader.fieldnames]
+    records = {}
     for row in reader:
-        if str(row.get("filter", "")).strip().casefold() == band.casefold():
-            filename = str(row.get("filename", "")).strip()
-            if filename.startswith("/") and not any(character.isspace() for character in filename):
-                return filename
-    raise URLError(f"Pan-STARRS filename service returned no stack image for band {band}")
+        normalized = {
+            str(key).strip().casefold(): str(value or "").strip()
+            for key, value in row.items()
+        }
+        if normalized.get("filter", "").casefold() != band.casefold():
+            continue
+        filename = normalized.get("filename", "")
+        if not re.fullmatch(
+            r"/rings\.v3\.skycell/[0-9]{4}/[0-9]{3}/[A-Za-z0-9_.-]+\.fits", filename
+        ):
+            continue
+        try:
+            ra_deg = float(normalized.get("ra", fallback_ra))
+            dec_deg = float(normalized.get("dec", fallback_dec))
+        except ValueError:
+            ra_deg, dec_deg = fallback_ra, fallback_dec
+        if not np.isfinite(ra_deg) or not np.isfinite(dec_deg):
+            ra_deg, dec_deg = fallback_ra, fallback_dec
+        records.setdefault(filename, (filename, ra_deg, dec_deg))
+    if not records:
+        raise URLError(f"Pan-STARRS filename service returned no stack image for band {band}")
+    return list(records.values())
 
 
-def _skymapper_fits_url(payload: bytes) -> str:
+def _panstarrs_filename(payload: bytes, band: str) -> str:
+    """Return the first matching file (kept for callers needing a single tile)."""
+    records = _panstarrs_image_records(payload, band, fallback_ra=0.0, fallback_dec=0.0)
+    return records[0][0]
+
+
+def _panstarrs_query_positions(request: TemplateRequest) -> list[tuple[float, float]]:
+    """Sample the whole science rectangle to discover every overlapping PS1 skycell."""
+    science_wcs, _, shape = _science_grid(request)
+    height, width = shape
+    if request.size_deg <= 0.12:
+        return [(request.ra_deg, request.dec_deg)]
+
+    center_row = (height - 1) / 2
+    center_column = (width - 1) / 2
+    left = science_wcs.pixel_to_world(0, center_row).icrs
+    right = science_wcs.pixel_to_world(width - 1, center_row).icrs
+    top = science_wcs.pixel_to_world(center_column, 0).icrs
+    bottom = science_wcs.pixel_to_world(center_column, height - 1).icrs
+    width_deg = float(left.separation(right).deg)
+    height_deg = float(top.separation(bottom).deg)
+    x_intervals = max(1, int(np.ceil(width_deg / _PANSTARRS_SAMPLE_SPACING_DEG)))
+    y_intervals = max(1, int(np.ceil(height_deg / _PANSTARRS_SAMPLE_SPACING_DEG)))
+    columns = np.linspace(0, width - 1, x_intervals + 1)
+    rows = np.linspace(0, height - 1, y_intervals + 1)
+    sample_columns, sample_rows = np.meshgrid(columns, rows)
+    sky = science_wcs.pixel_to_world(sample_columns.ravel(), sample_rows.ravel()).icrs
+    positions = {
+        (round(float(ra), 8), round(float(dec), 8))
+        for ra, dec in zip(sky.ra.deg, sky.dec.deg, strict=True)
+    }
+    positions.add((request.ra_deg, request.dec_deg))
+    return sorted(positions)
+
+
+def _skymapper_fits_urls(payload: bytes) -> list[str]:
     text = payload.decode("utf-8", errors="replace").strip()
     if not text:
         raise URLError("SkyMapper SIAP service returned no cutouts")
@@ -461,44 +529,129 @@ def _skymapper_fits_url(payload: bytes) -> str:
     if reader.fieldnames is None:
         raise URLError("SkyMapper SIAP service returned an invalid table")
     reader.fieldnames = [name.strip().casefold() for name in reader.fieldnames]
+    urls = []
     for row in reader:
         normalized = {str(key).strip().casefold(): str(value).strip() for key, value in row.items()}
         for key in ("get_fits", "get_image", "access_url"):
             url = normalized.get(key)
             if url:
                 parsed = urlsplit(url)
-                if parsed.scheme == "https" and parsed.hostname in SURVEY_HOSTS:
-                    return url
-    raise URLError("SkyMapper SIAP service returned no downloadable FITS cutout")
+                if parsed.scheme != "https" or parsed.hostname not in SURVEY_HOSTS:
+                    continue
+                if url not in urls:
+                    urls.append(url)
+                # The documented direct get_image endpoint accepts FORMAT=fits
+                # and is an alternate route when a returned get_fits link fails.
+                if key == "get_fits" and parsed.path.rstrip("/").endswith("/get_fits"):
+                    query = [
+                        (name, value)
+                        for name, value in parse_qsl(parsed.query, keep_blank_values=True)
+                        if name.casefold() != "format"
+                    ]
+                    query.append(("FORMAT", "fits"))
+                    image_path = parsed.path.rstrip("/")[: -len("get_fits")] + "get_image"
+                    alternate = urlunsplit(
+                        (parsed.scheme, parsed.netloc, image_path, urlencode(query), parsed.fragment)
+                    )
+                    if alternate not in urls:
+                        urls.append(alternate)
+    if not urls:
+        raise URLError("SkyMapper SIAP service returned no downloadable FITS cutout")
+    return urls
+
+
+def _skymapper_fits_url(payload: bytes) -> str:
+    """Return the preferred SkyMapper FITS URL for callers needing one link."""
+    return _skymapper_fits_urls(payload)[0]
 
 
 def _download_provider_fallback(
     request: TemplateRequest, timeout: float, limit: int
-) -> tuple[bytes, str, str]:
-    """Fetch a provider-native cutout after every CDS hips2fits host failed."""
+) -> tuple[list[tuple[bytes, bool]], list[str], str]:
+    """Fetch a provider-native FITS image or a set of panels after HiPS fails.
+
+    PS1's `fitscut.cgi` service limits each request to 6000 pixels. Querying a
+    single central skycell therefore clips large science footprints. Sample the
+    full science rectangle, retrieve every overlapping stack skycell, and mosaic
+    those panels locally. If the cutout CGI is unavailable, the documented full
+    skycell FITS URL is an alternate download path for that tile.
+    """
     provider = _provider_fallback(request)
     if provider is None:
         raise ValueError("Requested survey/band has no provider-native fallback")
+    if provider == "panstarrs":
+        return _download_panstarrs_fallback(request, timeout, limit)
     failures = []
     for attempt in range(SERVICE_ATTEMPTS):
         if attempt:
             sleep(HIPS_RETRY_DELAY_SECONDS)
         try:
-            if provider == "panstarrs":
-                filenames_url = _panstarrs_filenames_url(request)
-                filenames = _download_url(filenames_url, timeout, limit)
-                filename = _panstarrs_filename(filenames, request.template_filter)
-                cutout_url = _panstarrs_cutout_url(request, filename)
-                payload = _download_url(cutout_url, timeout, limit)
-                return payload, cutout_url, "Pan-STARRS"
             siaps_url = _skymapper_url(request)
             listing = _download_url(siaps_url, timeout, limit)
-            cutout_url = _skymapper_fits_url(listing)
-            payload = _download_url(cutout_url, timeout, limit)
-            return payload, cutout_url, "SkyMapper"
+            cutout_urls = _skymapper_fits_urls(listing)
+            link_failures = []
+            for cutout_url in cutout_urls:
+                try:
+                    payload = _download_url(cutout_url, timeout, limit)
+                    return [(payload, False)], [cutout_url], "SkyMapper"
+                except OSError as error:
+                    link_failures.append(f"{cutout_url}: {error}")
+            raise URLError("all SkyMapper FITS download links failed: " + "; ".join(link_failures))
         except OSError as error:
             failures.append(f"{provider}: {error}")
     raise URLError(f"{provider} provider fallback failed: " + "; ".join(failures))
+
+
+def _download_panstarrs_fallback(
+    request: TemplateRequest, timeout: float, limit: int
+) -> tuple[list[tuple[bytes, bool]], list[str], str]:
+    """Fetch a full-footprint PS1 mosaic, using direct skycell files as backup."""
+    images = {}
+    for ra_deg, dec_deg in _panstarrs_query_positions(request):
+        filenames_url = _panstarrs_filenames_url(request, ra_deg=ra_deg, dec_deg=dec_deg)
+        listing = _download_url(filenames_url, timeout, limit)
+        for record in _panstarrs_image_records(
+            listing,
+            request.template_filter,
+            fallback_ra=ra_deg,
+            fallback_dec=dec_deg,
+        ):
+            images.setdefault(record[0], record)
+
+    panels = []
+    image_urls = []
+    panel_size = int(
+        np.ceil(
+            max(request.size_deg, 2 * _PANSTARRS_SAMPLE_SPACING_DEG) * 3600.0 / 0.25
+        )
+    )
+    for filename, ra_deg, dec_deg in images.values():
+        cutout_url = _panstarrs_cutout_url(
+            request,
+            filename,
+            ra_deg=ra_deg,
+            dec_deg=dec_deg,
+            size_pixels=panel_size,
+        )
+        try:
+            panel = _download_url(cutout_url, timeout, limit)
+            linearized = False
+        except OSError as cutout_error:
+            image_url = PANSTARRS_IMAGE_URL + filename
+            try:
+                panel = _download_url(image_url, timeout, limit)
+                linearized = True
+                cutout_url = image_url
+            except OSError as direct_error:
+                raise URLError(
+                    f"PS1 cutout and full-skycell downloads failed: "
+                    f"{cutout_error}; {direct_error}"
+                ) from direct_error
+        panels.append((panel, linearized))
+        image_urls.append(cutout_url)
+    if not panels:
+        raise URLError("Pan-STARRS returned no images overlapping the science field")
+    return panels, image_urls, "Pan-STARRS"
 
 
 def _reproject_provider_cutout(
@@ -519,6 +672,47 @@ def _reproject_provider_cutout(
     # Provider services may encode uncovered pixels as zero.
     covered = (np.asarray(footprint) > 0) & (projected != 0)
     return np.where(covered, projected, np.nan)
+
+
+def _linearize_panstarrs_stack(image: np.ndarray, header: fits.Header) -> np.ndarray:
+    """Convert a directly downloaded PS1 stack from its documented asinh scale."""
+    bsoften = header.get("BSOFTEN")
+    boffset = header.get("BOFFSET")
+    if bsoften is None or boffset is None:
+        raise ValueError("Downloaded PS1 skycell is missing BSOFTEN/BOFFSET scaling metadata")
+    with np.errstate(over="ignore", invalid="ignore"):
+        exponent = image * 0.4 * np.log(10)
+        return float(boffset) + float(bsoften) * (np.exp(exponent) - np.exp(-exponent))
+
+
+def _reproject_provider_mosaic(
+    panels: list[tuple[np.ndarray, fits.Header, bool]],
+    science_wcs: WCS,
+    shape: tuple[int, int],
+) -> np.ndarray:
+    """Reproject and combine provider cutouts, preserving blank pixels as NaN."""
+    from reproject import reproject_interp
+
+    total = np.zeros(shape, dtype=float)
+    count = np.zeros(shape, dtype=np.uint16)
+    for image, header, is_panstarrs_stack in panels:
+        panel_wcs = _safe_wcs(header)
+        if panel_wcs.pixel_n_dim != 2 or not panel_wcs.has_celestial:
+            raise ValueError("Provider fallback cutout has no usable two-dimensional celestial WCS")
+        source = (
+            _linearize_panstarrs_stack(image, header) if is_panstarrs_stack else image
+        )
+        projected, footprint = reproject_interp(
+            (source, panel_wcs.celestial), science_wcs, shape_out=shape
+        )
+        projected = np.asarray(projected, dtype=float)
+        valid = (np.asarray(footprint) > 0) & np.isfinite(projected) & (projected != 0)
+        total[valid] += projected[valid]
+        count[valid] += 1
+    mosaic = np.full(shape, np.nan, dtype=float)
+    covered = count > 0
+    mosaic[covered] = total[covered] / count[covered]
+    return mosaic
 
 
 def _stc_polygon(wcs: WCS, shape: tuple[int, int], samples: int = 33) -> str:
@@ -694,7 +888,7 @@ def fetch_survey_template(
     max_download_mb: float = DEFAULT_MAX_DOWNLOAD_MB,
     check_moc_coverage: bool = True,
 ) -> SurveyTemplate:
-    """Download one bounded HiPS FITS, or verify and reuse a cached template.
+    """Download a HiPS template or provider fallback, or reuse a cached template.
 
     The returned image is already projected onto the requested science WCS and
     shape.  Pan-STARRS asinh values are linearized, non-finite pixels are masked,
@@ -714,6 +908,7 @@ def fetch_survey_template(
     identity.pop("native_science_filter")
     identity.pop("science_filter")
     identity.update(
+        cache_version=_TEMPLATE_CACHE_VERSION,
         backend="cds-hips2fits",
         hips_id=hips_id,
         width=shape[1],
@@ -743,28 +938,55 @@ def fetch_survey_template(
         if _provider_fallback(request) is None:
             raise
         try:
-            payload, query_url, survey_name = _download_provider_fallback(request, timeout, limit)
+            panels, source_urls, survey_name = _download_provider_fallback(
+                request, timeout, limit
+            )
         except OSError as fallback_error:
             raise URLError(
                 f"{hips_error}; the provider-native fallback also failed: {fallback_error}"
             ) from fallback_error
+        query_url = source_urls[0]
         fallback = {
             "survey": survey_name,
             "reason": "CDS hips2fits hosts did not respond",
             "reprojected": True,
+            "source_urls": source_urls,
+            "images_used": len(panels),
+            "strategy": (
+                "skycell-mosaic"
+                if survey_name == "Pan-STARRS"
+                else "siap-fits-link-retry"
+            ),
         }
         service = f"{survey_name} cutout"
-    data, header = _fits_image(payload)
+        if survey_name == "Pan-STARRS":
+            reprojected_panels = []
+            for panel_payload, is_full_stack in panels:
+                panel_data, panel_header = _fits_image(panel_payload)
+                reprojected_panels.append((panel_data, panel_header, is_full_stack))
+            data = _reproject_provider_mosaic(reprojected_panels, science_wcs, shape)
+            header = _science_grid(request)[1]
+        else:
+            data, header = _fits_image(panels[0][0])
+            data = _reproject_provider_cutout(data, header, science_wcs, shape)
+    else:
+        data, header = _fits_image(payload)
+        if data.shape != shape:
+            raise ValueError(
+                f"Downloaded HiPS template shape {data.shape} does not match the science grid {shape}"
+            )
+        if not _grid_matches(header, science_wcs, shape):
+            raise ValueError("Downloaded HiPS template does not match the science pixel grid")
+    native_filter = "" if fallback is not None else str(header.get("FILTER", "")).strip()
+    native_bunit = "" if fallback is not None else str(header.get("BUNIT", "")).strip()
     if fallback is not None:
-        data = _reproject_provider_cutout(data, header, science_wcs, shape)
-    elif data.shape != shape:
-        raise ValueError(
-            f"Downloaded HiPS template shape {data.shape} does not match the science grid {shape}"
-        )
-    elif not _grid_matches(header, science_wcs, shape):
-        raise ValueError("Downloaded HiPS template does not match the science pixel grid")
-    native_filter = str(header.get("FILTER", "")).strip()
-    native_bunit = str(header.get("BUNIT", "")).strip()
+        fallback["valid_fraction"] = float(np.isfinite(data).mean())
+        fallback["asinh_linearized"] = any(is_full_stack for _, is_full_stack in panels)
+        if request.size_deg > 0.12 and fallback["valid_fraction"] < 0.5:
+            raise ValueError(
+                f"{survey_name} fallback covers only {fallback['valid_fraction']:.1%} "
+                "of the science grid; at least 50% must be valid"
+            )
     delivered_band = request.template_filter
     asinh = fallback is None and _uses_asinh(hips_id)
     if asinh:
@@ -776,6 +998,8 @@ def fetch_survey_template(
         "SIMPLE",
         "BITPIX",
         "NAXIS",
+        "NAXIS1",
+        "NAXIS2",
         "EXTEND",
         "BSCALE",
         "BZERO",
@@ -784,7 +1008,6 @@ def fetch_survey_template(
     ):
         header.pop(keyword, None)
     header.update(science_wcs.to_header(relax=True))
-    header["NAXIS1"], header["NAXIS2"] = shape[1], shape[0]
     header["FILTER"] = delivered_band
     header["BUNIT"] = "relative-flux"
     header["HIPS"] = (hips_id, "Requested HiPS template identifier")
@@ -850,7 +1073,8 @@ def fetch_survey_template(
         "reference_mjd": None,
         "native_reference_filter": native_filter or delivered_band,
         "native_bunit": native_bunit,
-        "asinh_linearized": asinh,
+        "asinh_linearized": asinh
+        or bool(fallback is not None and fallback.get("asinh_linearized")),
         "shape": [shape[0], shape[1]],
         "variance_source": "none",
         "coverage_check": coverage,

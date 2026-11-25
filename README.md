@@ -6,7 +6,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/pierfra-rocci/proper_transient_finder)](https://github.com/pierfra-rocci/proper_transient_finder/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/pierfra-rocci/proper_transient_finder)](https://github.com/pierfra-rocci/proper_transient_finder/forks)
 [![GitHub issues](https://img.shields.io/github/issues/pierfra-rocci/proper_transient_finder)](https://github.com/pierfra-rocci/proper_transient_finder/issues)
-[![Version](https://img.shields.io/badge/version-0.3.4.1-blue)](https://github.com/pierfra-rocci/proper_transient_finder/releases)
+[![Version](https://img.shields.io/badge/version-0.3.4.2-blue)](https://github.com/pierfra-rocci/proper_transient_finder/releases)
 [![Documentation build](https://github.com/pierfra-rocci/proper_transient_finder/actions/workflows/docs.yml/badge.svg)](https://github.com/pierfra-rocci/proper_transient_finder/actions/workflows/docs.yml)
 
 
@@ -18,7 +18,7 @@ transient-candidate analysis. Python 3.11 or newer is required.
 The distribution is named `proper-transient-finder`; import it as
 `proper_transient_finder`.
 
-Current release: `0.3.4.1`.
+Current release: `0.3.4.2`.
 
 Inputs can use `.fits`, `.fit`, `.fts`, gzip compression (`.fits.gz`, `.fit.gz`,
 `.fts.gz`) or FITS tiled compression (`.fits.fz`, `.fit.fz`, `.fts.fz`). No manual
@@ -29,7 +29,7 @@ decompression is required; files must retain their original binary contents.
 Install a built wheel into your chosen Python environment:
 
 ```powershell
-python -m pip install ./dist/proper_transient_finder-0.3.4.1-py3-none-any.whl
+python -m pip install ./dist/proper_transient_finder-0.3.4.2-py3-none-any.whl
 python -m pip check
 ```
 
@@ -161,13 +161,19 @@ for schema, naming, configuration, and retry details.
 Opt in to downloading a HiPS survey reference for a science FITS image with
 valid celestial WCS. The library asks the CDS `hips2fits` service for exactly
 the science WCS and shape, so the complete footprint arrives as one cutout on
-the science pixel grid. No local tiling or mosaic is built, and the comparison
-pipeline runs without a second reprojection. If every CDS host fails,
-named-provider requests use the provider-native PS1 or SkyMapper FITS cutout
-service for supported bands. The cutout is reprojected locally onto the science
-grid. Provider fallbacks are cached and can be used by the normal subtraction
-pipeline, but their cross-provider bandpasses and calibration are explicitly
-marked as unverified and may require independent confirmation.
+the science pixel grid. The comparison pipeline runs without a second
+reprojection. If every CDS host fails, named-provider requests use the
+provider-native PS1 or SkyMapper FITS service for supported bands. The PS1
+fallback samples the science footprint, downloads all overlapping stack
+skycell cutouts, and mosaics them onto the science grid because each individual
+cutout is limited to 6000 pixels. If the PS1 cutout CGI is unavailable, it tries
+the documented full-skycell FITS download path. SkyMapper uses its DR4 SIAP
+service, trying its returned `get_fits` and `get_image` FITS routes in turn;
+the official web cutout page is an interface to this same service, not a
+separate image API. SkyMapper cutouts are limited to less than 10 arcminutes
+per side. Provider fallbacks are cached and can be used by the normal
+subtraction pipeline, but their cross-provider bandpasses and calibration are
+explicitly marked as unverified and may require independent confirmation.
 First, `--survey auto` selects Pan-STARRS or SkyMapper by declination and band;
 Pan-STARRS is preferred where both nominal coverage areas overlap. The default
 network timeout is 30 seconds per HTTP request. CDS hosts are tried in sequence
@@ -426,8 +432,8 @@ runs of the same version green, but bump `_version.py` to dry-run changed code.
 2. Commit the change, then tag and push it:
 
 ```bash
-git tag v0.3.4.1
-git push origin v0.3.4.1
+git tag v0.3.4.2
+git push origin v0.3.4.2
 ```
 
 The build job fails before building if the pushed tag is not `v<version>` taken

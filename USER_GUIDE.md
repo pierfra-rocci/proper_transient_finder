@@ -4,7 +4,7 @@
 
 Developed with assistance from ChatGPT, Claude, and Mistral.
 
-Version: `0.3.4.1`.
+Version: `0.3.4.2`.
 
 This standalone manual covers the astronomical subtraction pipeline, its
 launcher, its regression tests, and the commands used to run and validate it.
@@ -155,7 +155,7 @@ bash scripts/tasks.sh lint
 bash scripts/tasks.sh test -q -k preflight
 bash scripts/tasks.sh docs --check --build
 bash scripts/tasks.sh build --no-isolation
-bash scripts/tasks.sh verify-install --distribution dist/proper_transient_finder-0.3.4.1-py3-none-any.whl
+bash scripts/tasks.sh verify-install --distribution dist/proper_transient_finder-0.3.4.2-py3-none-any.whl
 ```
 
 Its options mirror the PowerShell parameters: `--output-directory` for
@@ -250,7 +250,7 @@ To prepare all runtime and test dependencies for offline installation:
 & (Join-Path $PipelineRoot "scripts\build.ps1") -PythonPath $Python -NoIsolation -IncludeDependencies
 $Dist = Join-Path $PipelineRoot "dist"
 $Wheelhouse = Join-Path $Dist "wheelhouse"
-$Wheel = Join-Path $Dist "proper_transient_finder-0.3.4.1-py3-none-any.whl"
+$Wheel = Join-Path $Dist "proper_transient_finder-0.3.4.2-py3-none-any.whl"
 & $Python -m pip install --no-index --find-links $Wheelhouse $Wheel
 ```
 
@@ -265,7 +265,7 @@ Verify a genuine fresh installation, not an editable checkout:
 
 ```powershell
 & (Join-Path $PipelineRoot "scripts\verify_install.ps1") -PythonPath $Python -DistributionPath $Wheel -Wheelhouse $Wheelhouse
-$SourceArchive = Join-Path $Dist "proper_transient_finder-0.3.4.1.tar.gz"
+$SourceArchive = Join-Path $Dist "proper_transient_finder-0.3.4.2.tar.gz"
 & (Join-Path $PipelineRoot "scripts\verify_install.ps1") -PythonPath $Python -DistributionPath $SourceArchive -Wheelhouse $Wheelhouse
 ```
 
@@ -466,10 +466,20 @@ network request has a default 30-second socket timeout. All CDS HiPS hosts and
 retry cycles are attempted before fallback.
 
 When every CDS host fails, named-provider requests use the provider-native
-FITS cutout service. Pan-STARRS uses `ps1filenames.py` and `fitscut.cgi`;
-SkyMapper uses its DR4 SIAP endpoint. Provider cutouts are reprojected locally
-onto the science grid. The cutout is cached and used by the normal subtraction
-pipeline, while provider-specific calibration is flagged as unverified.
+FITS service. Pan-STARRS samples the full science footprint with
+`ps1filenames.py`, downloads the overlapping stack skycell cutouts through
+`fitscut.cgi`, and mosaics them onto the science grid. Each PS1 cutout is
+limited to 6000 pixels; if `fitscut.cgi` is unavailable, the fallback tries
+the documented full-skycell FITS URL instead. SkyMapper queries its DR4 SIAP
+endpoint, then retries the returned `get_fits`, direct `get_image`, and
+`access_url` FITS links when a download route fails. If a `get_fits` URL fails,
+the documented `/get_image` route with `FORMAT=fits` is also attempted. The
+public web cutout page is an interface to the same SIAP service, not a separate
+FITS API host. Provider images are reprojected locally and the resulting template
+is cached and used by the normal subtraction pipeline, while
+provider-specific calibration is flagged as unverified. The fallback cache
+version changes with this acquisition strategy so earlier incomplete templates
+are not reused.
 `fetch_survey_template` returns the cutout for inspection or subtraction.
 Pan-STARRS
 supports `g r i z y`; SkyMapper supports `g r i`. Explicit HiPS identifiers,
@@ -666,9 +676,11 @@ optional science epoch are sent over HTTPS to the CDS HiPS services. Each
 request tries `alaskybis.cds.unistra.fr`, then `alasky.u-strasbg.fr`, then
 `alasky.cds.unistra.fr`, and retries that sequence up to three times, pausing
 briefly between cycles, before trying the provider-native fallback for supported
-named-provider/band pairs. Pan-STARRS uses `ps1images.stsci.edu`; SkyMapper uses
-`api.skymapper.nci.org.au`. Explicit HiPS identifiers and unmapped bands do not
-use provider fallbacks. The MOC coverage pre-check uses the same three-host
+named-provider/band pairs. Pan-STARRS uses `ps1images.stsci.edu`; SkyMapper
+queries `api.skymapper.nci.org.au` and tries the documented FITS download routes
+returned by SIAP. SkyMapper cutouts are limited to less than 10 arcmin on each
+side, so larger science fields may not be available through that endpoint.
+Explicit HiPS identifiers and unmapped bands do not use provider fallbacks. The MOC coverage pre-check uses the same three-host
 order and retry sequence and never applies to the fallback. Science pixels and
 local paths are not uploaded. Requests and redirects are restricted to these
 hosts (plus the other `alasky` mirrors and the provider hosts); TLS
